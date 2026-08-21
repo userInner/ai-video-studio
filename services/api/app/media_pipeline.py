@@ -8,15 +8,19 @@ import re
 import shutil
 import subprocess
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from .config import Settings
+from .quality import QualityGate
 from .storage import LocalAssetStore, StoredAsset
+from .visual_director import audit_storyboard, choose_visual_mode, direct_scene, split_section_narration
 
 
 class MediaPipelineError(RuntimeError):
@@ -250,33 +254,93 @@ class SpeechSynthesizer:
             return mp3.read_bytes()
 
 
-def build_storyboard(script: dict[str, Any]) -> dict[str, Any]:
+def build_storyboard(script: dict[str, Any], sources: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     scenes = []
-    for index, section in enumerate(script["sections"]):
-        mode = "whiteboard_drawing"
-        image_prompt = (
-            "Create one clean vertical whiteboard hand-drawn illustration for a Chinese explainer video. "
-            f"Narrative meaning: {section['visual_direction']}. "
-            "Arrange 2 to 4 separate visual islands from top to bottom in narrative order, with generous empty space "
-            "between them so each area can be drawn independently by a moving hand. Warm ivory paper #F5EBD7, "
-            "charcoal pencil outlines, sparse muted vermilion, ochre and grey-blue accents, flat simple editorial doodle style. "
-            "Use objects, symbols, arrows and simple anonymous figures instead of interface cards. "
-            "No words, no Chinese characters, no letters, no numbers, no labels, no logos, no watermark, "
-            "no photorealism, no 3D, no dense background. 2:3 portrait composition."
-        )
-        scenes.append(
-            {
-                "index": index,
-                "title": section["title"],
-                "narration": section["narration"],
-                "visual_direction": section["visual_direction"],
-                "visual_mode": mode,
-                "planned_seconds": section["estimated_seconds"],
-                "claim_source_urls": section["claim_source_urls"],
-                "image_prompt": image_prompt,
-            }
-        )
-    return {"version": 1, "format": "1080x1920", "fps": 25, "scenes": scenes}
+    previous_scene_type: str | None = None
+    previous_visual_mode: str | None = None
+    source_by_url = {str(source.get("url", "")): source for source in (sources or [])}
+    for section_index, section in enumerate(script["sections"]):
+        narration_parts = split_section_narration(section["narration"])
+        total_chars = sum(len(part) for part in narration_parts) or 1
+        for part_index, narration in enumerate(narration_parts):
+            index = len(scenes)
+            directed_section = {**section, "narration": narration}
+            direction = direct_scene(directed_section, index, previous_scene_type)
+            previous_scene_type = direction["scene_type"]
+            mode = choose_visual_mode(directed_section, direction, index, previous_visual_mode)
+            previous_visual_mode = mode
+            evidence_sources = []
+            for url in direction["evidence_source_urls"][:2]:
+                source = source_by_url.get(str(url))
+                evidence_sources.append(
+                    source
+                    or {
+                        "title": urlsplit(str(url)).path.rsplit("/", 1)[-1] or "核验来源",
+                        "url": str(url),
+                        "publisher": urlsplit(str(url)).netloc,
+                        "published_at": "",
+                        "summary": "该来源支持本场景中的事实陈述。",
+                        "credibility": "supporting",
+                    }
+                )
+            beat_summary = "; ".join(
+                f"{beat['kind']}: {beat['caption']}" for beat in direction["beats"]
+            )
+            image_prompt = (
+                "Create one energetic vertical whiteboard illustration designed for a fast-paced Chinese short video. "
+                f"Narrative meaning: {section['visual_direction']}. Current scene narration: {narration}. "
+                f"Visual grammar: {direction['scene_type']}. Visual beats in order: {beat_summary}. "
+                "Arrange one large focal object plus 2 to 4 clearly separated visual events in narrative order. "
+                "Use bold scale contrast and strong directional flow; avoid tiny objects and excessive empty space. "
+                "Leave clean separation between events so each area can be revealed independently. Warm ivory paper #F5EBD7, "
+                "charcoal pencil outlines, sparse muted vermilion, ochre and grey-blue accents, flat simple editorial doodle style. "
+                "Use objects, symbols, arrows and simple anonymous figures instead of interface cards. "
+                "No words, no Chinese characters, no letters, no numbers, no labels, no logos, no watermark, "
+                "no photorealism, no 3D, no dense background. 2:3 portrait composition."
+            )
+            title = section["title"] if len(narration_parts) == 1 else f"{section['title']} · {part_index + 1}"
+            scenes.append(
+                {
+                    "index": index,
+                    "source_section_index": section_index,
+                    "source_part_index": part_index,
+                    "title": title,
+                    "narration": narration,
+                    "visual_direction": section["visual_direction"],
+                    "visual_mode": mode,
+                    "planned_seconds": max(
+                        3, round(section["estimated_seconds"] * len(narration) / total_chars)
+                    ),
+                    "pacing_seconds": round(max(2.5, len(narration) / 4.2), 2),
+                    "claim_source_urls": section["claim_source_urls"],
+                    "evidence_sources": evidence_sources,
+                    "image_prompt": image_prompt,
+                    **direction,
+                }
+            )
+    storyboard = {
+        "version": 2,
+        "format": "1080x1920",
+        "fps": 25,
+        "visual_system": "douyin_whiteboard_v2",
+        "brand_style": {
+            "paper": "#F5EBD7",
+            "ink": "#18211D",
+            "signal": "#EF5A3C",
+            "highlight": "#F2C94C",
+        },
+        "scenes": scenes,
+    }
+    issues = audit_storyboard(storyboard)
+    if issues:
+        raise MediaPipelineError("视觉导演输出不合格：" + "；".join(issues))
+    storyboard = QualityGate.repair_storyboard(storyboard)
+    quality = storyboard["quality_report"]
+    if not quality["passed"]:
+        errors = [item["message"] for item in quality["issues"] if item["severity"] == "error"]
+        if errors:
+            raise MediaPipelineError("分镜质量检测未通过：" + "；".join(errors))
+    return storyboard
 
 
 class VerticalFrameRenderer:
@@ -329,7 +393,13 @@ class VerticalFrameRenderer:
             draw.text((84, y), line, font=title_font, fill=text_color, stroke_width=1)
             y += int(title_font.size * 1.25) if hasattr(title_font, "size") else 80
 
-        if mode == "timeline":
+        if mode == "evidence_screenshot":
+            self._evidence_screenshot(draw, y + 45, text_color, muted, scene)
+        elif mode == "data_animation":
+            self._data_animation(draw, y + 45, text_color, muted, scene)
+        elif mode == "relationship_map":
+            self._relationship_map(draw, y + 45, text_color, muted, scene)
+        elif mode == "timeline":
             self._timeline(draw, y + 70, text_color, muted)
         elif mode == "whiteboard":
             self._whiteboard(draw, y + 80, text_color, muted, scene["visual_direction"])
@@ -405,6 +475,114 @@ class VerticalFrameRenderer:
             draw.text((190, top + 52), label, font=self.font(34), fill=text)
             draw.text((190, top + 104), "EVIDENCE-BOUND", font=self.font(18), fill=muted)
 
+    def _evidence_screenshot(
+        self,
+        draw: ImageDraw.ImageDraw,
+        y: int,
+        text: str,
+        muted: str,
+        scene: dict[str, Any],
+    ) -> None:
+        source = (scene.get("evidence_sources") or [{}])[0]
+        draw.rounded_rectangle((72, y, 1008, y + 760), radius=30, fill="#FFFFFF", outline="#D8DDD9", width=3)
+        draw.rounded_rectangle((72, y, 1008, y + 76), radius=30, fill="#E9ECE9")
+        for position, color in enumerate(("#EF5A3C", "#F2C94C", "#68A889")):
+            cx = 112 + position * 38
+            draw.ellipse((cx - 9, y + 29, cx + 9, y + 47), fill=color)
+        publisher = str(source.get("publisher") or urlsplit(str(source.get("url", ""))).netloc or "核验来源")
+        draw.text((112, y + 118), publisher, font=self.font(28), fill=self.green)
+        credibility = str(source.get("credibility") or "supporting").upper()
+        draw.rounded_rectangle((770, y + 105, 958, y + 157), radius=22, fill="#E9F4EE")
+        draw.text((864, y + 131), credibility, font=self.font(18), fill=self.green, anchor="mm")
+        title_y = y + 194
+        title_font = self.font(45)
+        for line in self._wrap(str(source.get("title") or scene["title"]), title_font, 800, max_lines=3):
+            draw.text((112, title_y), line, font=title_font, fill=text)
+            title_y += 66
+        draw.line((112, title_y + 22, 942, title_y + 22), fill="#E3E7E3", width=3)
+        summary_y = title_y + 66
+        summary_font = self.font(30)
+        summary = str(source.get("summary") or "该来源支持本段中的事实陈述。")
+        for line in self._wrap(summary, summary_font, 790, max_lines=4):
+            draw.text((112, summary_y), line, font=summary_font, fill=muted)
+            summary_y += 47
+        published_at = str(source.get("published_at") or "发布时间以原始页面为准")
+        draw.text((112, y + 672), published_at, font=self.font(22), fill=muted)
+        host = urlsplit(str(source.get("url", ""))).netloc
+        draw.text((942, y + 672), host, font=self.font(22), fill=self.signal, anchor="ra")
+
+    def _data_animation(
+        self,
+        draw: ImageDraw.ImageDraw,
+        y: int,
+        text: str,
+        muted: str,
+        scene: dict[str, Any],
+    ) -> None:
+        points = (scene.get("data_points") or [])[:4]
+        if not points:
+            points = [{"label": "关键变化", "value": 1, "display_value": "1"}]
+        values = [max(0.0, float(point.get("value") or 0)) for point in points]
+        maximum = max(values) or 1
+        chart_left, chart_right = 118, 952
+        chart_top, chart_bottom = y + 100, y + 720
+        draw.line((chart_left, chart_top, chart_left, chart_bottom), fill=self.ink, width=5)
+        draw.line((chart_left, chart_bottom, chart_right, chart_bottom), fill=self.ink, width=5)
+        gap = (chart_right - chart_left) / len(points)
+        for position, (point, value) in enumerate(zip(points, values)):
+            bar_width = min(150, int(gap * 0.56))
+            cx = int(chart_left + gap * (position + 0.5))
+            height = max(28, int((chart_bottom - chart_top - 95) * value / maximum))
+            color = self.signal if value == maximum else (self.green if position % 2 == 0 else "#D7A928")
+            draw.rounded_rectangle((cx - bar_width // 2, chart_bottom - height, cx + bar_width // 2, chart_bottom), radius=18, fill=color)
+            display = str(point.get("display_value") or value)
+            draw.text((cx, chart_bottom - height - 42), display, font=self.font(31), fill=text, anchor="mm")
+            label = str(point.get("label") or f"数据{position + 1}")[:8]
+            draw.text((cx, chart_bottom + 42), label, font=self.font(24), fill=muted, anchor="mm")
+        draw.text((118, y + 18), "数据不是装饰，它必须绑定来源", font=self.font(28), fill=muted)
+
+    def _relationship_map(
+        self,
+        draw: ImageDraw.ImageDraw,
+        y: int,
+        text: str,
+        muted: str,
+        scene: dict[str, Any],
+    ) -> None:
+        relationships = (scene.get("relationships") or [])[:4]
+        entities = list(dict.fromkeys(str(item) for item in (scene.get("entities") or []) if item))
+        if not relationships and len(entities) >= 2:
+            relationships = [{"source": entities[0], "target": entities[1], "label": "关联"}]
+        if not relationships:
+            relationships = [{"source": "事件", "target": "结果", "label": "影响"}]
+        nodes = list(
+            dict.fromkeys(
+                str(value)
+                for relationship in relationships
+                for value in (relationship.get("source"), relationship.get("target"))
+                if value
+            )
+        )[:5]
+        positions = [(230, y + 190), (820, y + 190), (525, y + 470), (230, y + 700), (820, y + 700)]
+        node_positions = {node: positions[position] for position, node in enumerate(nodes)}
+        for relationship in relationships:
+            source = str(relationship.get("source", ""))
+            target = str(relationship.get("target", ""))
+            if source not in node_positions or target not in node_positions:
+                continue
+            x0, y0 = node_positions[source]
+            x1, y1 = node_positions[target]
+            draw.line((x0, y0, x1, y1), fill=self.green, width=7)
+            mx, my = (x0 + x1) // 2, (y0 + y1) // 2
+            draw.rounded_rectangle((mx - 84, my - 27, mx + 84, my + 27), radius=18, fill="#FFFFFF", outline="#CED7D1", width=2)
+            draw.text((mx, my), str(relationship.get("label") or "关联")[:8], font=self.font(20), fill=muted, anchor="mm")
+        for position, node in enumerate(nodes):
+            cx, cy = positions[position]
+            fill = "#FFF0E8" if position == 0 else "#FFFFFF"
+            outline = self.signal if position == 0 else self.ink
+            draw.ellipse((cx - 120, cy - 76, cx + 120, cy + 76), fill=fill, outline=outline, width=6)
+            draw.text((cx, cy), node[:10], font=self.font(29), fill=text, anchor="mm")
+
 
 class VideoCompositor:
     def __init__(self, asset_store: LocalAssetStore):
@@ -454,14 +632,28 @@ class VideoCompositor:
         secs, cs = divmod(rem, 100)
         return f"{hours}:{minutes:02d}:{secs:02d}.{cs:02d}"
 
-    def scene_video(self, frame: Path, audio: Path, narration: str, output: Path, mode: str, whiteboard: Path | None) -> None:
+    def scene_video(
+        self,
+        frame: Path,
+        audio: Path,
+        narration: str,
+        output: Path,
+        mode: str,
+        whiteboard: Path | None,
+        visual_plan: dict[str, Any] | None = None,
+    ) -> None:
         duration = self.duration(audio)
         work_dir = output.parent / f"{output.stem}-frames"
         work_dir.mkdir(parents=True, exist_ok=True)
-        chunks = [item.strip() for item in re.split(r"(?<=[。！？；])", narration) if item.strip()] or [narration]
+        beats = (visual_plan or {}).get("beats") or []
+        chunks = [str(item.get("caption", "")).strip() for item in beats if item.get("caption")]
+        if not chunks:
+            chunks = [item.strip() for item in re.split(r"(?<=[。！？；])", narration) if item.strip()] or [narration]
         weights = [max(len(chunk), 1) for chunk in chunks]
         if whiteboard is not None:
-            self._whiteboard_scene_video(whiteboard, audio, chunks, weights, duration, work_dir, output)
+            self._whiteboard_scene_video(
+                whiteboard, audio, chunks, weights, duration, work_dir, output, visual_plan or {}
+            )
             return
         still_seconds = duration
         caption_inputs: list[str] = []
@@ -508,29 +700,46 @@ class VideoCompositor:
         duration: float,
         work_dir: Path,
         output: Path,
+        visual_plan: dict[str, Any],
     ) -> None:
-        inputs = ["-i", str(whiteboard)]
-        filters = [
-            "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
-            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=#F5F3EC,setsar=1[v0]"
-        ]
-        cursor = 0.0
+        overlay_manifest = work_dir / "subtitle-overlays.ffconcat"
+        manifest_lines = ["ffconcat version 1.0"]
         total_weight = sum(weights)
+        beats = visual_plan.get("beats") or []
+        scene_type = str(visual_plan.get("scene_type", "causal_chain"))
+        last_overlay: Path | None = None
         for index, (chunk, weight) in enumerate(zip(chunks, weights), start=1):
             overlay = work_dir / f"subtitle-{index:02d}.png"
-            self._caption_overlay(overlay, chunk)
-            inputs.extend(["-loop", "1", "-framerate", "25", "-i", str(overlay)])
-            end = min(duration, cursor + duration * weight / total_weight)
-            filters.append(
-                f"[v{index - 1}][{index}:v]overlay=0:0:enable='between(t,{cursor:.4f},{end:.4f})'[v{index}]"
+            beat = beats[index - 1] if index - 1 < len(beats) else {}
+            self._caption_overlay(
+                overlay,
+                chunk,
+                str(beat.get("emphasis", "")),
+                str(beat.get("kind", "sketch")),
+                scene_type,
+                index - 1,
+                len(chunks),
             )
-            cursor = end
-        audio_index = len(chunks) + 1
-        inputs.extend(["-i", str(audio)])
+            span = duration * weight / total_weight
+            escaped_path = str(overlay.resolve()).replace("'", "'\\''")
+            manifest_lines.extend([f"file '{escaped_path}'", f"duration {span:.6f}"])
+            last_overlay = overlay
+        if last_overlay is not None:
+            escaped_last = str(last_overlay.resolve()).replace("'", "'\\''")
+            manifest_lines.append(f"file '{escaped_last}'")
+        overlay_manifest.write_text("\n".join(manifest_lines), encoding="utf-8")
+
+        filters = [
+            self._camera_filter(str(visual_plan.get("camera_motion", "slow_push"))),
+            "[v0][1:v]overlay=0:0:repeatlast=1:eof_action=repeat[v]",
+        ]
         result = subprocess.run(
             [
-                self.ffmpeg, "-y", "-loglevel", "error", *inputs,
-                "-filter_complex", ";".join(filters), "-map", f"[v{len(chunks)}]", "-map", f"{audio_index}:a:0",
+                self.ffmpeg, "-y", "-loglevel", "error",
+                "-i", str(whiteboard),
+                "-f", "concat", "-safe", "0", "-i", str(overlay_manifest),
+                "-i", str(audio),
+                "-filter_complex", ";".join(filters), "-map", "[v]", "-map", "2:a:0",
                 "-t", f"{duration:.4f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
                 "-pix_fmt", "yuv420p", "-r", "25", "-c:a", "aac", "-ar", "48000", "-ac", "2",
                 "-b:a", "160k", "-movflags", "+faststart", str(output),
@@ -542,58 +751,180 @@ class VideoCompositor:
             raise MediaPipelineError(f"白板场景合成失败：{result.stderr[-800:]}")
 
     @staticmethod
-    def _caption_overlay(output: Path, caption: str) -> None:
-        overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        font = chinese_font(43)
-        draw.rounded_rectangle((58, 1565, 1022, 1810), radius=30, fill=(8, 15, 12, 218), outline=(255, 255, 255, 36), width=2)
+    def _camera_filter(motion: str) -> str:
+        filters = {
+            "push_in": (
+                "[0:v]scale=1188:2112,crop=1080:1920:"
+                "x='(iw-ow)/2+10*sin(t*1.2)':y='(ih-oh)/2+14*cos(t*0.8)',setsar=1[v0]"
+            ),
+            "snap_push": (
+                "[0:v]scale=1210:2151,crop=1080:1920:"
+                "x='(iw-ow)/2+18*sin(t*1.8)':y='(ih-oh)/2',setsar=1[v0]"
+            ),
+            "vertical_pan": (
+                "[0:v]scale=1120:1992,crop=1080:1920:"
+                "x='(iw-ow)/2':y='(ih-oh)*(0.5+0.35*sin(t*0.55))',setsar=1[v0]"
+            ),
+            "horizontal_pan": (
+                "[0:v]scale=1140:2027,crop=1080:1920:"
+                "x='(iw-ow)*(0.5+0.35*sin(t*0.65))':y='(ih-oh)/2',setsar=1[v0]"
+            ),
+            "locked_then_push": (
+                "[0:v]scale=1155:2053,crop=1080:1920:"
+                "x='(iw-ow)/2':y='(ih-oh)/2-10*sin(t*0.7)',setsar=1[v0]"
+            ),
+        }
+        return filters.get(
+            motion,
+            "[0:v]scale=1134:2016,crop=1080:1920:"
+            "x='(iw-ow)/2+12*sin(t*0.5)':y='(ih-oh)/2+12*cos(t*0.45)',setsar=1[v0]",
+        )
+
+    @staticmethod
+    def _wrap_caption(
+        draw: ImageDraw.ImageDraw,
+        caption: str,
+        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+        max_width: int = 790,
+        max_lines: int = 2,
+    ) -> list[str]:
         lines: list[str] = []
         current = ""
-        for char in caption:
+        clean_caption = " ".join(caption.split())
+        for char in clean_caption:
             candidate = current + char
-            if current and draw.textlength(candidate, font=font) > 850:
+            if current and draw.textlength(candidate, font=font) > max_width:
                 lines.append(current)
                 current = char
-                if len(lines) == 2:
+                if len(lines) == max_lines:
                     break
             else:
                 current = candidate
-        if current and len(lines) < 3:
+        if current and len(lines) < max_lines:
             lines.append(current)
-        if sum(len(line) for line in lines) < len(caption) and lines:
-            lines[-1] = lines[-1][:-1] + "…"
-        y = 1622 if len(lines) <= 2 else 1595
-        for line in lines[:3]:
-            draw.text((540, y), line, font=font, fill="white", anchor="ma", stroke_width=1, stroke_fill=(0, 0, 0, 180))
-            y += 64
+        if sum(len(line) for line in lines) < len(clean_caption) and lines:
+            lines[-1] = lines[-1].rstrip("，。！？；：、")
+            lines[-1] = (lines[-1][:-1] if lines[-1] else "") + "…"
+        if len(lines) == 2:
+            # Chinese captions look broken when a natural width wrap leaves only
+            # one or two glyphs on the second line. Rebalance the pair while both
+            # lines still fit the card.
+            while len(lines[0]) > len(lines[1]) + 2:
+                candidate_first = lines[0][:-1]
+                candidate_second = lines[0][-1] + lines[1]
+                if draw.textlength(candidate_second, font=font) > max_width:
+                    break
+                lines = [candidate_first, candidate_second]
+        return lines or [" "]
+
+    @classmethod
+    def _draw_paper_caption(
+        cls,
+        draw: ImageDraw.ImageDraw,
+        caption: str,
+        *,
+        bottom: int,
+    ) -> tuple[int, int, int, int]:
+        """Draw an adaptive paper-note caption that belongs to the whiteboard world."""
+        font = chinese_font(46)
+        lines = cls._wrap_caption(draw, caption, font)
+        line_height = 62
+        text_width = max(int(draw.textlength(line, font=font)) for line in lines)
+        card_width = max(410, min(930, text_width + 126))
+        card_height = 54 + line_height * len(lines)
+        left = (1080 - card_width) // 2
+        top = bottom - card_height
+        right = left + card_width
+
+        # A soft offset shadow and slightly imperfect marker stroke keep this from
+        # reading like a generic app notification pasted over the illustration.
+        draw.rounded_rectangle(
+            (left + 5, top + 10, right + 5, bottom + 10),
+            radius=21,
+            fill=(24, 30, 26, 42),
+        )
+        draw.rounded_rectangle(
+            (left, top, right, bottom),
+            radius=21,
+            fill=(250, 247, 238, 244),
+            outline=(48, 55, 50, 92),
+            width=2,
+        )
+        marker_x = left + 31
+        draw.line(
+            ((marker_x + 1, top + 24), (marker_x - 2, bottom - 25)),
+            fill=(232, 82, 55, 235),
+            width=9,
+        )
+        draw.line(
+            ((marker_x + 5, top + 27), (marker_x + 2, bottom - 28)),
+            fill=(244, 118, 88, 150),
+            width=3,
+        )
+
+        text_x = left + 61
+        text_y = top + 27 + line_height / 2
+        for line in lines:
+            draw.text(
+                (text_x, text_y),
+                line,
+                font=font,
+                fill=(26, 34, 30, 255),
+                anchor="lm",
+            )
+            text_y += line_height
+        return left, top, right, bottom
+
+    @classmethod
+    def _caption_overlay(
+        cls,
+        output: Path,
+        caption: str,
+        emphasis: str = "",
+        kind: str = "sketch",
+        scene_type: str = "causal_chain",
+        beat_index: int = 0,
+        beat_count: int = 1,
+    ) -> None:
+        overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        _, _, _, caption_bottom = cls._draw_paper_caption(draw, caption, bottom=1768)
+
+        if emphasis:
+            if kind in {"big_number", "question", "contrast"} or scene_type in {"hook_burst", "reversal"}:
+                accent = (239, 90, 60, 242) if kind != "question" else (242, 201, 76, 244)
+                label_font = chinese_font(78 if len(emphasis) <= 6 else 60)
+                label_width = min(920, int(draw.textlength(emphasis, font=label_font)) + 104)
+                draw.rounded_rectangle((70, 105, 70 + label_width, 235), radius=30, fill=accent)
+                draw.text((122, 169), emphasis, font=label_font, fill=(20, 28, 24, 255), anchor="lm")
+            else:
+                label_font = chinese_font(36)
+                label_width = min(600, int(draw.textlength(emphasis, font=label_font)) + 86)
+                draw.rounded_rectangle(
+                    (70, 112, 70 + label_width, 190),
+                    radius=20,
+                    fill=(250, 243, 224, 238),
+                    outline=(54, 61, 56, 80),
+                    width=2,
+                )
+                draw.ellipse((92, 139, 108, 155), fill=(239, 90, 60, 255))
+                draw.text((126, 151), emphasis, font=label_font, fill=(26, 34, 30, 255), anchor="lm")
+
+        dot_gap = 28
+        dot_start = 540 - (max(1, beat_count) - 1) * dot_gap / 2
+        for position in range(max(1, beat_count)):
+            color = (239, 90, 60, 255) if position == beat_index else (44, 52, 47, 92)
+            cx = int(dot_start + position * dot_gap)
+            dot_y = caption_bottom + 27
+            draw.ellipse((cx - 5, dot_y - 5, cx + 5, dot_y + 5), fill=color)
         overlay.save(output, format="PNG", optimize=True)
 
-    @staticmethod
-    def _caption_frame(frame: Path, output: Path, caption: str) -> None:
+    @classmethod
+    def _caption_frame(cls, frame: Path, output: Path, caption: str) -> None:
         image = Image.open(frame).convert("RGBA")
         overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
-        font = chinese_font(43)
-        draw.rounded_rectangle((58, 1265, 1022, 1510), radius=30, fill=(8, 15, 12, 218), outline=(255, 255, 255, 36), width=2)
-        lines: list[str] = []
-        current = ""
-        for char in caption:
-            candidate = current + char
-            if current and draw.textlength(candidate, font=font) > 850:
-                lines.append(current)
-                current = char
-                if len(lines) == 2:
-                    break
-            else:
-                current = candidate
-        if current and len(lines) < 3:
-            lines.append(current)
-        if sum(len(line) for line in lines) < len(caption) and lines:
-            lines[-1] = lines[-1][:-1] + "…"
-        y = 1322 if len(lines) <= 2 else 1295
-        for line in lines[:3]:
-            draw.text((540, y), line, font=font, fill="white", anchor="ma", stroke_width=1, stroke_fill=(0, 0, 0, 180))
-            y += 64
+        cls._draw_paper_caption(draw, caption, bottom=1510)
         Image.alpha_composite(image, overlay).convert("RGB").save(output, format="PNG", optimize=True)
 
     def concatenate(self, scene_paths: list[Path], output: Path) -> None:
@@ -622,8 +953,9 @@ class MediaPipeline:
         script_version: int,
         build_version: int,
         script: dict[str, Any],
+        sources: list[dict[str, Any]] | None = None,
     ) -> MediaProductionResult:
-        storyboard = build_storyboard(script)
+        storyboard = build_storyboard(script, sources)
         produced: list[ProducedAsset] = []
         voice_provider = ""
         image_provider = "not-needed"
@@ -636,19 +968,59 @@ class MediaPipeline:
 
             async def load_whiteboard_source(scene: dict[str, Any]) -> tuple[int, bytes, ProducedAsset, str]:
                 index = scene["index"]
-                relative = f"projects/{project_id}/whiteboard-sources/v{script_version}/scene-{index + 1:02d}.png"
+                relative = (
+                    f"projects/{project_id}/whiteboard-sources/v{script_version}/"
+                    f"douyin-whiteboard-v2/scene-{index + 1:02d}.png"
+                )
                 path = self.settings.asset_root / relative
+                retry_count = 0
+
+                async def generate_or_fallback(prompt: str) -> tuple[bytes, str]:
+                    try:
+                        async with image_semaphore:
+                            return await self.images.generate(prompt), "sub2api"
+                    except Exception:
+                        source_index = int(scene.get("source_section_index", index))
+                        legacy_relative = (
+                            f"projects/{project_id}/whiteboard-sources/v{script_version}/"
+                            f"scene-{source_index + 1:02d}.png"
+                        )
+                        legacy_path = self.settings.asset_root / legacy_relative
+                        if not legacy_path.is_file():
+                            raise
+                        return self.assets.read_bytes(legacy_relative), "legacy-v1-fallback"
+
                 if path.is_file():
                     content = self.assets.read_bytes(relative)
                     provider = "sub2api-cache"
                 else:
-                    async with image_semaphore:
-                        content = await self.images.generate(scene["image_prompt"])
-                    provider = "sub2api"
+                    content, provider = await generate_or_fallback(scene["image_prompt"])
+                quality = QualityGate.assess_frame(content, index)
+                while (
+                    not quality.passed
+                    and retry_count < self.settings.media_quality_max_retries
+                    and self.settings.resolved_sub2api_key()
+                ):
+                    retry_count += 1
+                    correction = QualityGate.correction_prompt(quality)
+                    content, retry_provider = await generate_or_fallback(
+                        f"{scene['image_prompt']} Quality correction: {correction}."
+                    )
+                    provider = "sub2api-redo" if retry_provider == "sub2api" else retry_provider
+                    quality = QualityGate.assess_frame(content, index)
+                if not quality.passed:
+                    messages = "；".join(issue.message for issue in quality.issues)
+                    raise MediaPipelineError(f"第 {index + 1} 个场景重做后仍未通过画面检测：{messages}")
                 stored = self.assets.write_bytes(relative, content)
                 asset = ProducedAsset(
                     "raw_illustration", stored, "sub2api", self.settings.image_model, index,
-                    {"prompt": scene["image_prompt"], "whiteboard_source": True, "cached": provider.endswith("cache")},
+                    {
+                        "prompt": scene["image_prompt"],
+                        "whiteboard_source": True,
+                        "cached": provider.endswith("cache"),
+                        "quality_report": quality.as_dict(),
+                        "redo_count": retry_count,
+                    },
                 )
                 return index, content, asset, provider
 
@@ -672,14 +1044,30 @@ class MediaPipeline:
                 return values
 
             audio_task = asyncio.create_task(prepare_audio())
-            image_results = await asyncio.gather(*(load_whiteboard_source(scene) for scene in storyboard["scenes"]))
-            image_provider = "sub2api-cache" if all(item[3] == "sub2api-cache" for item in image_results) else "sub2api"
+            generated_scenes = [scene for scene in storyboard["scenes"] if scene["visual_mode"] == "whiteboard_drawing"]
+            try:
+                image_results = await asyncio.gather(*(load_whiteboard_source(scene) for scene in generated_scenes))
+            except BaseException:
+                audio_task.cancel()
+                with suppress(BaseException):
+                    await audio_task
+                raise
+            if not image_results:
+                image_provider = "local-visuals"
+            elif all(item[3] == "sub2api-cache" for item in image_results):
+                image_provider = "sub2api-cache"
+            elif any(item[3] == "sub2api-redo" for item in image_results):
+                image_provider = "sub2api-redo"
+            elif any(item[3] == "legacy-v1-fallback" for item in image_results):
+                image_provider = "mixed-v2-fallback"
+            else:
+                image_provider = "sub2api"
             for index, content, asset, _ in image_results:
                 illustration_by_scene[index] = content
                 produced.append(asset)
             audio_by_scene = await audio_task
 
-            scene_videos: list[Path] = []
+            audio_file_by_scene: dict[int, tuple[Path, float]] = {}
             for scene in storyboard["scenes"]:
                 index = scene["index"]
                 audio_bytes, provider, model, extension = audio_by_scene[index]
@@ -689,16 +1077,59 @@ class MediaPipeline:
                 audio_path = self.assets.path_for_read(audio_stored.relative_path)
                 duration = compositor.duration(audio_path)
                 scene["actual_seconds"] = round(duration, 3)
-                produced.append(ProducedAsset("scene_audio", audio_stored, provider, model, index, {"duration_seconds": duration}))
+                audio_file_by_scene[index] = (audio_path, duration)
+                produced.append(
+                    ProducedAsset(
+                        "scene_audio",
+                        audio_stored,
+                        provider,
+                        model,
+                        index,
+                        {"duration_seconds": duration},
+                    )
+                )
+
+            # TTS duration is the real clock. Re-run rhythm and repetition
+            # repair after audio exists so optimistic script estimates cannot
+            # leave a visually static scene in the final video.
+            storyboard = QualityGate.repair_storyboard(storyboard)
+            actual_quality = storyboard["quality_report"]
+            if not actual_quality["passed"]:
+                errors = [
+                    item["message"]
+                    for item in actual_quality["issues"]
+                    if item["severity"] == "error"
+                ]
+                raise MediaPipelineError("实际配音节奏检测未通过：" + "；".join(errors))
+
+            scene_videos: list[Path] = []
+            for scene in storyboard["scenes"]:
+                index = scene["index"]
+                audio_path, duration = audio_file_by_scene[index]
 
                 frame_relative = f"{base}/frames/scene-{index + 1:02d}.png"
                 frame_cached = self.settings.asset_root / frame_relative
                 frame_bytes = self.assets.read_bytes(frame_relative) if frame_cached.is_file() else self.frames.render(scene, illustration_by_scene.get(index))
+                frame_quality = QualityGate.assess_frame(frame_bytes, index)
+                if not frame_quality.passed:
+                    messages = "；".join(issue.message for issue in frame_quality.issues)
+                    raise MediaPipelineError(f"第 {index + 1} 个场景画面质量检测未通过：{messages}")
                 frame_stored = self.assets.write_bytes(frame_relative, frame_bytes)
                 frame_path = self.assets.path_for_read(frame_stored.relative_path)
                 visual_provider = "sub2api" if index in illustration_by_scene else "local-graphics"
                 visual_model = self.settings.image_model if index in illustration_by_scene else "editorial-card-v1"
-                produced.append(ProducedAsset("scene_visual", frame_stored, visual_provider, visual_model, index, {"visual_mode": scene["visual_mode"]}))
+                visual_metadata = {
+                    "visual_mode": scene["visual_mode"],
+                    "quality_report": frame_quality.as_dict(),
+                }
+                produced.append(ProducedAsset("scene_visual", frame_stored, visual_provider, visual_model, index, visual_metadata))
+                special_kind = {
+                    "evidence_screenshot": "evidence_screenshot",
+                    "data_animation": "data_animation_frame",
+                    "relationship_map": "relationship_map",
+                }.get(scene["visual_mode"])
+                if special_kind:
+                    produced.append(ProducedAsset(special_kind, frame_stored, "local", "visual-director-v2", index, visual_metadata))
 
                 subtitle_path = temp_dir / f"scene-{index + 1:02d}.ass"
                 compositor.subtitle(subtitle_path, scene["narration"], duration)
@@ -706,7 +1137,7 @@ class MediaPipeline:
                 produced.append(ProducedAsset("scene_subtitle", subtitle_stored, "local", "ass-v1", index, {"duration_seconds": duration}))
 
                 whiteboard_path, annotation = await asyncio.to_thread(
-                    self._render_whiteboard, frame_path, temp_dir, index, duration, scene["narration"]
+                    self._render_whiteboard, frame_path, temp_dir, index, duration, scene["narration"], scene
                 )
                 if whiteboard_path is None:
                     raise MediaPipelineError(f"第 {index + 1} 个场景没有生成白板绘制动画")
@@ -725,7 +1156,14 @@ class MediaPipeline:
 
                 scene_output = temp_dir / f"scene-{index + 1:02d}.mp4"
                 await asyncio.to_thread(
-                    compositor.scene_video, frame_path, audio_path, scene["narration"], scene_output, scene["visual_mode"], whiteboard_path
+                    compositor.scene_video,
+                    frame_path,
+                    audio_path,
+                    scene["narration"],
+                    scene_output,
+                    scene["visual_mode"],
+                    whiteboard_path,
+                    scene,
                 )
                 video_stored = self.assets.write_bytes(
                     f"{base}/scenes/scene-{index + 1:02d}.mp4",
@@ -757,11 +1195,14 @@ class MediaPipeline:
         index: int,
         duration_seconds: float,
         narration: str,
+        visual_plan: dict[str, Any] | None = None,
     ) -> tuple[Path | None, dict[str, Any]]:
         legacy_root = self.settings.whiteboard_renderer_root.resolve()
         renderer = legacy_root / "scripts" / "render_stream_whiteboard.py"
         renderer = renderer.resolve()
-        annotation = self._build_whiteboard_annotation(index, duration_seconds, narration)
+        annotation = self._build_whiteboard_annotation(
+            index, duration_seconds, narration, (visual_plan or {}).get("beats")
+        )
         if not renderer.is_file():
             return None, annotation
         output_dir = temp_dir / f"whiteboard-{index}"
@@ -785,8 +1226,15 @@ class MediaPipeline:
         return (output.resolve() if output.is_file() else None), annotation
 
     @staticmethod
-    def _build_whiteboard_annotation(index: int, duration_seconds: float, narration: str) -> dict[str, Any]:
-        chunks = [item.strip() for item in re.split(r"(?<=[。！？；])", narration) if item.strip()] or [narration]
+    def _build_whiteboard_annotation(
+        index: int,
+        duration_seconds: float,
+        narration: str,
+        beats: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        chunks = [str(item.get("caption", "")).strip() for item in (beats or []) if item.get("caption")]
+        if not chunks:
+            chunks = [item.strip() for item in re.split(r"(?<=[。！？；])", narration) if item.strip()] or [narration]
         if len(chunks) > 4:
             grouped: list[str] = []
             group_size = max(1, (len(chunks) + 3) // 4)
@@ -794,7 +1242,10 @@ class MediaPipeline:
                 grouped.append("".join(chunks[start:start + group_size]))
             chunks = grouped[:4]
         total_ms = max(2500, round(duration_seconds * 1000))
-        drawing_ms = max(1800, total_ms - 700)
+        # A Douyin scene should not spend its whole duration showing the hand.
+        # Reveal the drawing quickly, then let typography, camera motion and the
+        # completed composition carry the narration.
+        drawing_ms = min(total_ms - 600, max(900, round(total_ms * 0.36)))
         weights = [max(1, len(chunk)) for chunk in chunks]
         total_weight = sum(weights)
         pad_x = 34
@@ -806,12 +1257,13 @@ class MediaPipeline:
             y0 = pad_y + round(usable_height * position / len(chunks))
             y1 = pad_y + round(usable_height * (position + 1) / len(chunks))
             span = max(550, round(drawing_ms * weight / total_weight))
-            duration_ms = max(500, min(span - 100, total_ms - cursor - 500))
+            duration_ms = max(220, min(span - 80, drawing_ms - cursor + 100))
+            beat = beats[position] if beats and position < len(beats) else {}
             elements.append({
                 "id": f"event-{position + 1:02d}",
                 "label": chunk[:18],
                 "sequence": position + 1,
-                "narrativeRole": "按旁白顺序绘制的视觉事件",
+                "narrativeRole": str(beat.get("kind", "sketch")),
                 "subtitle": chunk,
                 "type": "subject",
                 "region": {"x": pad_x, "y": y0, "width": 1080 - pad_x * 2, "height": max(1, y1 - y0)},
@@ -834,5 +1286,7 @@ class MediaPipeline:
             "canvas": {"width": 1080, "height": 1920},
             "storyBasis": narration,
             "sceneDurationMs": total_ms,
+            "drawingDurationMs": drawing_ms,
+            "handScreenRatio": round(drawing_ms / total_ms, 3),
             "elements": elements,
         }

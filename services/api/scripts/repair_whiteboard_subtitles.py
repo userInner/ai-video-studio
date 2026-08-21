@@ -53,24 +53,39 @@ def main() -> None:
     assets = LocalAssetStore(settings.asset_root)
     compositor = VideoCompositor(assets)
     base = f"projects/{args.project_id}/media/v{args.script_version}/build-{args.build_version}"
-    script_path = settings.asset_root / f"projects/{args.project_id}/scripts/script-v{args.script_version}.json"
-    script = json.loads(script_path.read_text(encoding="utf-8"))
+    storyboard_path = settings.asset_root / base / "storyboard.json"
+    storyboard = json.loads(storyboard_path.read_text(encoding="utf-8"))
     updates: dict[str, tuple[str, int]] = {}
+
+    current_final = settings.asset_root / base / "final" / "video.mp4"
+    backup_relative = f"{base}/final/video-before-caption-redesign.mp4"
+    backup_path = settings.asset_root / backup_relative
+    if current_final.is_file() and not backup_path.exists():
+        assets.write_bytes(backup_relative, current_final.read_bytes())
 
     with tempfile.TemporaryDirectory(prefix="subtitle-repair-") as temp_value:
         temp = Path(temp_value)
         scene_paths = []
-        for index, section in enumerate(script["sections"]):
+        for index, scene in enumerate(storyboard["scenes"]):
             number = index + 1
             frame = settings.asset_root / base / "frames" / f"scene-{number:02d}.png"
             whiteboard = settings.asset_root / base / "whiteboard" / f"scene-{number:02d}.mp4"
             audio = settings.asset_root / base / "audio" / f"scene-{number:02d}.wav"
             output = temp / f"scene-{number:02d}.mp4"
-            compositor.scene_video(frame, audio, section["narration"], output, "whiteboard_drawing", whiteboard)
+            compositor.scene_video(
+                frame,
+                audio,
+                scene["narration"],
+                output,
+                str(scene.get("visual_mode", "whiteboard_drawing")),
+                whiteboard if whiteboard.is_file() else None,
+                scene,
+            )
             relative = f"{base}/scenes/scene-{number:02d}.mp4"
             stored = assets.write_bytes(relative, output.read_bytes())
             updates[relative] = (stored.sha256, stored.size)
             scene_paths.append(output)
+            print(f"SCENE={number}/{len(storyboard['scenes'])}", flush=True)
 
         final_temp = temp / "video.mp4"
         compositor.concatenate(scene_paths, final_temp)

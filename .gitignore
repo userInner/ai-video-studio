@@ -15,4 +15,5 @@ apps/web/*.tsbuildinfo
 apps/web/AGENTS.md
 apps/web/CLAUDE.md
 data/
+outputs/
 docs/demo/*.mp4

@@ -20,6 +20,9 @@ COPY packages /app/packages
 COPY services/api /app/services/api
 COPY vendor/srt-whiteboard-animation /app/vendor/srt-whiteboard-animation
 
+RUN test -f /app/vendor/srt-whiteboard-animation/scripts/render_stream_whiteboard.py \
+    || (echo "Missing whiteboard submodule. Clone with --recurse-submodules or run: git submodule update --init --recursive" >&2; exit 1)
+
 RUN python -m pip install -e /app/packages/whiteboard_engine \
     && mkdir -p /app/data/assets
 

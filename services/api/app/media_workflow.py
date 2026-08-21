@@ -10,7 +10,7 @@ from sqlalchemy import desc, select
 from .config import Settings
 from .db import SessionLocal
 from .media_pipeline import MediaPipeline
-from .models import ArtifactVersion, MediaAsset, Project, ScriptVersion, StoryboardVersion, WorkflowEvent, WorkflowRun
+from .models import ArtifactVersion, MediaAsset, Project, ScriptVersion, Source, StoryboardVersion, WorkflowEvent, WorkflowRun
 
 
 def utcnow() -> datetime:
@@ -87,14 +87,30 @@ class MediaProductionRunner:
                 await self._fail(session, run, "脚本没有准备好，媒体生产未启动")
                 return
             try:
-                await self._event(session, run, "storyboarding", 12, "正在把脚本拆成全程白板绘制分镜")
+                await self._event(session, run, "storyboarding", 12, "正在拆分视觉节拍并检测节奏与重复镜头")
                 current_version = await session.scalar(
                     select(StoryboardVersion.version).where(StoryboardVersion.project_id == project_id).order_by(desc(StoryboardVersion.version)).limit(1)
                 )
                 storyboard_version = (current_version or 0) + 1
-                await self._event(session, run, "generating_media", 30, "正在生成本地 Qwen 配音和 Image2 白板画稿")
-                result = await self.pipeline.produce(project_id, script.version, storyboard_version, script.content_json)
-                await self._event(session, run, "composing_video", 88, "正在合成字幕、音轨和竖屏场景")
+                await self._event(session, run, "generating_media", 30, "正在生成白板、证据、数据与人物关系画面")
+                source_rows = (
+                    await session.scalars(select(Source).where(Source.project_id == project_id))
+                ).all()
+                sources = [
+                    {
+                        "title": source.title,
+                        "url": source.url,
+                        "publisher": source.publisher,
+                        "published_at": source.published_at,
+                        "credibility": source.credibility,
+                        "summary": source.summary,
+                    }
+                    for source in source_rows
+                ]
+                result = await self.pipeline.produce(
+                    project_id, script.version, storyboard_version, script.content_json, sources
+                )
+                await self._event(session, run, "composing_video", 88, "正在完成低质量重做并合成竖屏视频")
 
                 storyboard_snapshot = self.pipeline.assets.write_json(
                     f"projects/{project_id}/media/v{script.version}/build-{storyboard_version}/storyboard.json",

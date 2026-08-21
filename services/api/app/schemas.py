@@ -120,6 +120,20 @@ class UpdateProductionCardRequest(BaseModel):
     duration_seconds: int | None = Field(default=None, ge=180, le=600)
 
 
+class DataPointContract(ContractBase):
+    label: str = Field(min_length=1, max_length=40)
+    value: float
+    display_value: str = Field(min_length=1, max_length=24)
+    unit: str = Field(default="", max_length=12)
+    source_url: str = ""
+
+
+class RelationshipContract(ContractBase):
+    source: str = Field(min_length=1, max_length=40)
+    target: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=40)
+
+
 class ScriptSectionContract(ContractBase):
     section_type: Literal["hook", "context", "evidence", "analysis", "turn", "takeaway", "closing"]
     title: str
@@ -127,6 +141,9 @@ class ScriptSectionContract(ContractBase):
     narration: str
     visual_direction: str
     claim_source_urls: list[str]
+    entities: list[str] = Field(default_factory=list, max_length=10)
+    relationships: list[RelationshipContract] = Field(default_factory=list, max_length=8)
+    data_points: list[DataPointContract] = Field(default_factory=list, max_length=8)
     estimated_seconds: int = Field(ge=10, le=120)
 
 

@@ -1,5 +1,7 @@
 # AI Video Studio · 传播引擎
 
+[简体中文](README.md) | [English](README.en.md)
+
 把一个标题或模糊想法，自动变成有证据、有传播角度、有固定主播配音的竖屏白板视频。
 
 项目覆盖从选题到 MP4 的完整链路：联网调研、事实核验、传播方向、人工确认、脚本、白板插图、逐笔动画、配音、字幕和 FFmpeg 合成。白板是默认视觉能力，不是产品边界。
@@ -19,7 +21,11 @@
 - 生成三个不同传播角度，由用户确认后才开始制作。
 - 生成 3～10 分钟、逐段绑定来源的口播脚本。
 - 使用图片模型生成暖纸张、铅笔线条风格的白板画稿。
+- 使用抖音视觉导演把每段旁白拆成动态节拍，并自动选择钩子、时间线、证据、因果、反转和总结镜头。
 - 使用上游 `srt-whiteboard-animation` 按语义区域逐笔绘制全部场景。
+- 限制手部绘制占比，配合关键词、大数字、短字幕和轻运镜，避免整段视频像静态白板课件。
+- 自动穿插来源证据截图卡、数据动画和人物关系图，并为每项事实保留来源绑定。
+- 自动检测节奏过慢、重复镜头、画面过空或过密；低质量 AI 插图会追加纠正提示并重新生成。
 - 默认使用 MiniMax 固定 `voice_id` 配音；可选本地 Qwen3-TTS 锁定主播声纹。
 - 输出 1080×1920、H.264/AAC 竖屏 MP4 和独立字幕文件。
 - 项目、脚本、分镜、媒体和成片全部版本化并保存在本地。
@@ -40,7 +46,87 @@ flowchart LR
     I --> J[竖屏 MP4]
 ```
 
-## 快速开始
+## Docker Compose 本地部署（推荐）
+
+### 环境要求
+
+- Docker Desktop，或 Docker Engine + Compose v2
+- 至少 8 GB 内存；正式生成 3～10 分钟视频建议 16 GB
+- 至少 20 GB 可用磁盘空间
+
+### 1. 下载项目
+
+```bash
+git clone --recurse-submodules https://github.com/userInner/ai-video-studio.git
+cd ai-video-studio
+cp .env.example .env
+```
+
+如果已经用普通方式克隆，请补充下载白板引擎：
+
+```bash
+git submodule update --init --recursive
+```
+
+### 2. 配置模型服务
+
+打开 `.env`，至少填写：
+
+```dotenv
+SUB2API_BASE_URL=https://sub2api.aibro.vip/v1
+SUB2API_API_KEY=你的_SUB2API_Key
+TEXT_MODEL=gpt-5.6-luna
+IMAGE_MODEL=gpt-image-2
+
+MINIMAX_API_KEY=你的_MiniMax_Key
+TTS_MODEL=speech-2.8-hd
+TTS_VOICE_ID=Chinese (Mandarin)_Reliable_Executive
+```
+
+密钥留空时容器仍能启动，也可以查看界面和演示选题流程；生成真实调研、AI 插图和完整 MP4 必须配置相应服务。
+
+### 3. 一条命令启动
+
+```bash
+docker compose up --build -d
+```
+
+等待两个服务显示 `healthy`：
+
+```bash
+docker compose ps
+```
+
+然后打开：
+
+- 网页：<http://127.0.0.1:3000>
+- API 健康检查：<http://127.0.0.1:8010/healthz>
+- API 文档：<http://127.0.0.1:8010/docs>
+
+首次构建需要下载 Python、Node.js 依赖，通常需要几分钟。项目数据库、插图、配音、分镜和成片全部保存在宿主机 `./data`，重启或重建容器不会丢失。
+
+### 常用命令
+
+```bash
+# 查看运行状态
+docker compose ps
+
+# 查看实时日志
+docker compose logs -f api web
+
+# 重启
+docker compose restart
+
+# 停止；不会删除 ./data
+docker compose down
+
+# 拉取代码后重新构建
+git pull
+git submodule update --init --recursive
+docker compose up --build -d
+```
+
+## 源码方式启动
 
 ### 环境要求
 
@@ -80,18 +166,7 @@ TTS_VOICE_ID=replace-with-a-stable-voice-id
 
 打开 <http://127.0.0.1:3000>，API 位于 <http://127.0.0.1:8010>。
 
-## Docker
-
-CPU 服务器使用 MiniMax 配音时可直接运行：
-
-```bash
-cp .env.example .env
-# 编辑 .env 后执行
-git submodule update --init --recursive
-docker compose up --build
-```
-
-数据保存在宿主机 `./data`。部署建议见 [docs/deployment.md](docs/deployment.md)。
+更多服务器部署建议见 [docs/deployment.md](docs/deployment.md)。
 
 ## 配音选择
 

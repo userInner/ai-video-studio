@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     image_model: str = "gpt-image-2"
     image_quality: str = "medium"
     image_timeout_seconds: int = 360
+    media_quality_max_retries: int = 1
     minimax_base_url: str = "https://api.minimax.io"
     minimax_api_key: str | None = Field(default=None, repr=False)
     tts_model: str = "speech-2.8-hd"
