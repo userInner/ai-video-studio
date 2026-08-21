@@ -1,0 +1,3 @@
+[submodule "vendor/srt-whiteboard-animation"]
+	path = vendor/srt-whiteboard-animation
+	url = https://github.com/geeklee/srt-whiteboard-animation.git

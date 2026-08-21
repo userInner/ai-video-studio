@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Describe the actual and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe reproduction without API keys or private media.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Environment
+      description: OS, Python, Node.js, FFmpeg and selected providers.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Logs
+      description: Remove credentials, personal data and signed media URLs first.
+      render: shell

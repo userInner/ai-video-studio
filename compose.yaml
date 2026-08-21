@@ -1,0 +1,33 @@
+name: ai-video-studio
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////app/data/app.db
+      ASSET_ROOT: /app/data/assets
+      WHITEBOARD_RENDERER_ROOT: /app/vendor/srt-whiteboard-animation
+      ALLOWED_ORIGINS: http://127.0.0.1:3000,http://localhost:3000
+      PREFER_LOCAL_QWEN_TTS: "false"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8010:8010"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:8010}
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    restart: unless-stopped

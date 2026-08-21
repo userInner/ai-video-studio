@@ -1,0 +1,11 @@
+.git
+.github
+.env
+.venv
+data
+apps/web/node_modules
+apps/web/.next
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+**/*.tsbuildinfo
