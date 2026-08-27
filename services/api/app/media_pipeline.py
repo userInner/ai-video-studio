@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
@@ -1243,7 +1244,7 @@ class MediaPipeline:
         output = output_dir / "render.mp4"
         result = subprocess.run(
             [
-                str(Path(__file__).resolve().parents[3] / ".venv" / "bin" / "python"), str(renderer),
+                str(self._renderer_python()), str(renderer),
                 str(frame), str(annotation_path), str(output), str(legacy_root / "assets" / "drawing-hand.png"),
                 "--total-ms", str(max(2500, round(duration_seconds * 1000))), "--fps", "15",
                 "--grid-edge", "12", "--pause", "auto", "--ink-path", "grid",
@@ -1255,6 +1256,13 @@ class MediaPipeline:
         if result.returncode != 0:
             return None, annotation
         return (output.resolve() if output.is_file() else None), annotation
+
+    @staticmethod
+    def _renderer_python() -> Path:
+        executable = Path(sys.executable).resolve()
+        if not executable.is_file():
+            raise MediaPipelineError("当前 Python 解释器不可用，无法启动白板渲染器")
+        return executable
 
     @staticmethod
     def _build_whiteboard_annotation(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from PIL import Image
@@ -84,6 +85,11 @@ def test_whiteboard_annotation_sequences_narration_regions() -> None:
     assert len(annotation["elements"]) == 3
     assert [item["sequence"] for item in annotation["elements"]] == [1, 2, 3]
     assert annotation["elements"][0]["region"]["y"] < annotation["elements"][-1]["region"]["y"]
+
+
+def test_whiteboard_renderer_uses_current_python_runtime() -> None:
+    assert MediaPipeline._renderer_python() == Path(sys.executable).resolve()
+    assert MediaPipeline._renderer_python().is_file()
 
 
 def test_visual_director_changes_camera_and_layout_by_section() -> None:
