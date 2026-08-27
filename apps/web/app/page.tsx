@@ -737,8 +737,19 @@ export default function Home() {
             )}
             {project.media_run && !["completed", "failed"].includes(project.media_run.status) && (
               <div className="productionProgress mediaProgress">
-                <div><span>{stepLabels[project.media_run.step] ?? t.makingFinal}</span><b>{project.media_run.progress}%</b></div>
+                <div><span>{traceEvents.at(-1)?.message ?? stepLabels[project.media_run.step] ?? t.makingFinal}</span><b>{project.media_run.progress}%</b></div>
                 <i><span style={{ width: `${project.media_run.progress}%` }} /></i>
+                {traceEvents.length > 0 && (
+                  <ol className="mediaWorkLog">
+                    {traceEvents.slice(-5).reverse().map((event, index) => (
+                      <li className={index === 0 ? "active" : ""} key={event.id}>
+                        <time>{traceTime(event.created_at)}</time>
+                        <span>{event.message}</span>
+                        {typeof event.progress === "number" && <b>{event.progress}%</b>}
+                      </li>
+                    ))}
+                  </ol>
+                )}
               </div>
             )}
             {project.production_run?.status === "failed" && !project.script && <button className="retryButton" onClick={confirm} disabled={busy}>{t.retryScript} <ArrowRight /></button>}

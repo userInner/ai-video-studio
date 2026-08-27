@@ -11,6 +11,7 @@ import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -25,6 +26,9 @@ from .visual_director import audit_storyboard, choose_visual_mode, direct_scene,
 
 class MediaPipelineError(RuntimeError):
     pass
+
+
+ProgressCallback = Callable[[str, int, str, dict[str, Any]], Awaitable[None]]
 
 
 def chinese_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -917,8 +921,19 @@ class MediaPipeline:
         build_version: int,
         script: dict[str, Any],
         sources: list[dict[str, Any]] | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> MediaProductionResult:
         storyboard = build_storyboard(script, sources)
+
+        async def report(step: str, progress: int, message: str, details: dict[str, Any] | None = None) -> None:
+            if progress_callback is None:
+                return
+            try:
+                await progress_callback(step, progress, message, details or {})
+            except Exception:
+                # Progress reporting must never abort an otherwise healthy render.
+                return
+
         produced: list[ProducedAsset] = []
         voice_provider = ""
         image_provider = "not-needed"
@@ -928,8 +943,11 @@ class MediaPipeline:
             compositor = VideoCompositor(self.assets)
             illustration_by_scene: dict[int, bytes] = {}
             image_semaphore = asyncio.Semaphore(2)
+            image_progress_lock = asyncio.Lock()
+            completed_images = 0
 
             async def load_whiteboard_source(scene: dict[str, Any]) -> tuple[int, bytes, ProducedAsset, str]:
+                nonlocal completed_images
                 index = scene["index"]
                 relative = (
                     f"projects/{project_id}/whiteboard-sources/v{script_version}/"
@@ -985,6 +1003,20 @@ class MediaPipeline:
                         "redo_count": retry_count,
                     },
                 )
+                async with image_progress_lock:
+                    completed_images += 1
+                    image_progress = 32 + round(34 * completed_images / max(1, len(generated_scenes)))
+                    await report(
+                        "generating_media",
+                        image_progress,
+                        f"白板插图已完成 {completed_images}/{len(generated_scenes)}",
+                        {
+                            "completed": completed_images,
+                            "total": len(generated_scenes),
+                            "scene_index": index,
+                            "asset_type": "whiteboard_illustration",
+                        },
+                    )
                 return index, content, asset, provider
 
             async def prepare_audio() -> dict[int, tuple[bytes, str, str, str]]:
@@ -1008,6 +1040,12 @@ class MediaPipeline:
 
             audio_task = asyncio.create_task(prepare_audio())
             generated_scenes = [scene for scene in storyboard["scenes"] if scene["visual_mode"] == "whiteboard_drawing"]
+            await report(
+                "generating_media",
+                30,
+                f"开始生成 {len(generated_scenes)} 张白板插图",
+                {"completed": 0, "total": len(generated_scenes), "scene_count": len(storyboard["scenes"])},
+            )
             try:
                 image_results = await asyncio.gather(*(load_whiteboard_source(scene) for scene in generated_scenes))
             except BaseException:
@@ -1029,6 +1067,12 @@ class MediaPipeline:
                 illustration_by_scene[index] = content
                 produced.append(asset)
             audio_by_scene = await audio_task
+            await report(
+                "generating_media",
+                68,
+                "插图与配音素材已经齐全，正在校验实际节奏",
+                {"image_count": len(image_results), "audio_count": len(audio_by_scene)},
+            )
 
             audio_file_by_scene: dict[int, tuple[Path, float]] = {}
             for scene in storyboard["scenes"]:
@@ -1066,6 +1110,12 @@ class MediaPipeline:
                 raise MediaPipelineError("实际配音节奏检测未通过：" + "；".join(errors))
 
             scene_videos: list[Path] = []
+            await report(
+                "generating_media",
+                70,
+                f"开始渲染 {len(storyboard['scenes'])} 个白板动画分镜",
+                {"completed": 0, "total": len(storyboard["scenes"]), "asset_type": "scene_video"},
+            )
             for scene in storyboard["scenes"]:
                 index = scene["index"]
                 audio_path, duration = audio_file_by_scene[index]
@@ -1134,8 +1184,26 @@ class MediaPipeline:
                 )
                 produced.append(ProducedAsset("scene_video", video_stored, "ffmpeg", "h264-aac", index, {"duration_seconds": duration}))
                 scene_videos.append(scene_output)
+                completed_scenes = len(scene_videos)
+                await report(
+                    "generating_media",
+                    70 + round(16 * completed_scenes / max(1, len(storyboard["scenes"]))),
+                    f"白板动画分镜已完成 {completed_scenes}/{len(storyboard['scenes'])}",
+                    {
+                        "completed": completed_scenes,
+                        "total": len(storyboard["scenes"]),
+                        "scene_index": index,
+                        "asset_type": "scene_video",
+                    },
+                )
 
             final_path = temp_dir / "final.mp4"
+            await report(
+                "composing_video",
+                90,
+                "全部分镜已经完成，正在拼接最终视频",
+                {"scene_count": len(scene_videos)},
+            )
             await asyncio.to_thread(compositor.concatenate, scene_videos, final_path)
             final_duration = compositor.duration(final_path)
             final_stored = self.assets.write_bytes(

@@ -40,13 +40,24 @@ class MediaProductionRunner:
             for run_id in ids.all():
                 self.submit(run_id)
 
-    async def _event(self, session, run: WorkflowRun, step: str, progress: int, message: str) -> None:
+    async def _event(
+        self,
+        session,
+        run: WorkflowRun,
+        step: str,
+        progress: int,
+        message: str,
+        details: dict | None = None,
+    ) -> None:
         run.status = "running"
         run.step = step
         run.progress = progress
         if run.started_at is None:
             run.started_at = utcnow()
-        session.add(WorkflowEvent(run_id=run.id, event_type="progress", message=message, payload={"progress": progress, "step": step}))
+        payload = {"progress": progress, "step": step}
+        if details:
+            payload.update(details)
+        session.add(WorkflowEvent(run_id=run.id, event_type="progress", message=message, payload=payload))
         await session.commit()
 
     async def _wait_for_script(self, project_id: str, attempts: int = 240) -> ScriptVersion | None:
@@ -107,10 +118,32 @@ class MediaProductionRunner:
                     }
                     for source in source_rows
                 ]
+
+                progress_lock = asyncio.Lock()
+
+                async def report_progress(step: str, progress: int, message: str, details: dict) -> None:
+                    async with progress_lock:
+                        async with SessionLocal() as progress_session:
+                            progress_run = await progress_session.get(WorkflowRun, run_id)
+                            if progress_run is not None and progress_run.status in {"queued", "running"}:
+                                await self._event(
+                                    progress_session,
+                                    progress_run,
+                                    step,
+                                    progress,
+                                    message,
+                                    details,
+                                )
+
                 result = await self.pipeline.produce(
-                    project_id, script.version, storyboard_version, script.content_json, sources
+                    project_id,
+                    script.version,
+                    storyboard_version,
+                    script.content_json,
+                    sources,
+                    progress_callback=report_progress,
                 )
-                await self._event(session, run, "composing_video", 88, "正在完成低质量重做并合成竖屏视频")
+                await self._event(session, run, "composing_video", 94, "成片已合成，正在保存项目产物")
 
                 storyboard_snapshot = self.pipeline.assets.write_json(
                     f"projects/{project_id}/media/v{script.version}/build-{storyboard_version}/storyboard.json",
