@@ -49,6 +49,16 @@ def test_vertical_frame_has_douyin_dimensions() -> None:
     assert image.size == (1080, 1920)
 
 
+def test_sparse_frame_repair_adds_a_visible_focus_band() -> None:
+    scene = build_storyboard(sample_script())["scenes"][0]
+    regular = VerticalFrameRenderer().render(scene)
+    repaired = VerticalFrameRenderer().render(scene, quality_corrections={"sparse_frame"})
+    regular_report = QualityGate.assess_frame(regular, scene["index"])
+    repaired_report = QualityGate.assess_frame(repaired, scene["index"])
+    assert repaired_report.metrics["foreground_ratio"] > regular_report.metrics["foreground_ratio"]
+    assert repaired_report.passed
+
+
 def test_ass_subtitles_cover_scene_duration(tmp_path: Path) -> None:
     compositor = VideoCompositor(LocalAssetStore(tmp_path / "assets"))
     target = tmp_path / "scene.ass"

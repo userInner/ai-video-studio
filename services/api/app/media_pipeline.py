@@ -34,6 +34,8 @@ ProgressCallback = Callable[[str, int, str, dict[str, Any]], Awaitable[None]]
 
 def chinese_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     candidates = [
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
         Path("/System/Library/Fonts/STHeiti Medium.ttc"),
         Path("/System/Library/Fonts/STHeiti Light.ttc"),
         Path("/System/Library/Fonts/Supplemental/Songti.ttc"),
@@ -321,6 +323,8 @@ class VerticalFrameRenderer:
 
     def __init__(self) -> None:
         candidates = [
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
             Path("/System/Library/Fonts/PingFang.ttc"),
             Path("/System/Library/AssetsV2/com_apple.MobileAsset_Font8/53fe5be564086fefc7523ccd0a31200acf92e0e5f9fc31e138.asset/AssetData/STHEITI.ttf"),
             Path("/System/Library/Fonts/STHeiti Medium.ttc"),
@@ -330,7 +334,12 @@ class VerticalFrameRenderer:
     def font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         return ImageFont.truetype(str(self.font_path), size) if self.font_path else chinese_font(size)
 
-    def render(self, scene: dict[str, Any], illustration: bytes | None = None) -> bytes:
+    def render(
+        self,
+        scene: dict[str, Any],
+        illustration: bytes | None = None,
+        quality_corrections: set[str] | None = None,
+    ) -> bytes:
         canvas = Image.new("RGB", (self.width, self.height), self.paper)
         draw = ImageDraw.Draw(canvas)
         mode = scene["visual_mode"]
@@ -388,9 +397,29 @@ class VerticalFrameRenderer:
             body_y += 48
         draw.text((84, 1850), "WHITEBOARD IS A CAPABILITY, NOT THE BOUNDARY", font=self.font(20), fill=muted)
 
+        if quality_corrections and "sparse_frame" in quality_corrections:
+            self._sparse_frame_repair(draw, scene, text_color)
+
         with tempfile.NamedTemporaryFile(suffix=".png") as handle:
             canvas.save(handle.name, format="PNG", optimize=True)
             return Path(handle.name).read_bytes()
+
+    def _sparse_frame_repair(
+        self,
+        draw: ImageDraw.ImageDraw,
+        scene: dict[str, Any],
+        text: str,
+    ) -> None:
+        """Add a factual focus band when a locally rendered frame is too sparse."""
+        top, bottom = 1270, 1460
+        draw.rounded_rectangle((84, top, 996, bottom), radius=30, fill="#DDE8E2", outline=self.green, width=4)
+        draw.rounded_rectangle((84, top, 104, bottom), radius=10, fill=self.signal)
+        draw.text((140, top + 28), "本段关键关系", font=self.font(24), fill=self.green)
+        title_font = self.font(38)
+        title_y = top + 76
+        for line in self._wrap(str(scene.get("title") or "关键事实"), title_font, 790, max_lines=2):
+            draw.text((140, title_y), line, font=title_font, fill=text)
+            title_y += 50
 
     def _wrap(self, text: str, font: ImageFont.ImageFont, max_width: int, max_lines: int) -> list[str]:
         draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
@@ -1125,9 +1154,33 @@ class MediaPipeline:
                 frame_cached = self.settings.asset_root / frame_relative
                 frame_bytes = self.assets.read_bytes(frame_relative) if frame_cached.is_file() else self.frames.render(scene, illustration_by_scene.get(index))
                 frame_quality = QualityGate.assess_frame(frame_bytes, index)
+                frame_redo_count = 0
+                while not frame_quality.passed and frame_redo_count < self.settings.frame_quality_max_retries:
+                    frame_redo_count += 1
+                    issue_codes = {issue.code for issue in frame_quality.issues}
+                    await report(
+                        "generating_media",
+                        70 + round(16 * len(scene_videos) / max(1, len(storyboard["scenes"]))),
+                        f"第 {index + 1} 个场景画面未达标，正在自动重做 {frame_redo_count}/{self.settings.frame_quality_max_retries}",
+                        {
+                            "scene_index": index,
+                            "asset_type": "scene_visual",
+                            "retry": frame_redo_count,
+                            "max_retries": self.settings.frame_quality_max_retries,
+                            "quality_report": frame_quality.as_dict(),
+                        },
+                    )
+                    frame_bytes = self.frames.render(
+                        scene,
+                        illustration_by_scene.get(index),
+                        quality_corrections=issue_codes,
+                    )
+                    frame_quality = QualityGate.assess_frame(frame_bytes, index)
                 if not frame_quality.passed:
                     messages = "；".join(issue.message for issue in frame_quality.issues)
-                    raise MediaPipelineError(f"第 {index + 1} 个场景画面质量检测未通过：{messages}")
+                    raise MediaPipelineError(
+                        f"第 {index + 1} 个场景自动重做 {frame_redo_count} 次后仍未通过画面检测：{messages}"
+                    )
                 frame_stored = self.assets.write_bytes(frame_relative, frame_bytes)
                 frame_path = self.assets.path_for_read(frame_stored.relative_path)
                 visual_provider = "sub2api" if index in illustration_by_scene else "local-graphics"
@@ -1135,6 +1188,7 @@ class MediaPipeline:
                 visual_metadata = {
                     "visual_mode": scene["visual_mode"],
                     "quality_report": frame_quality.as_dict(),
+                    "redo_count": frame_redo_count,
                 }
                 produced.append(ProducedAsset("scene_visual", frame_stored, visual_provider, visual_model, index, visual_metadata))
                 special_kind = {
