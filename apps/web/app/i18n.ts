@@ -43,6 +43,40 @@ export const STEP_LABELS = {
   },
 } as const;
 
+export const TRACE_LABELS = {
+  zh: {
+    scope_started: { title: "已收到主题，正在拆解调研目标", detail: "识别事件主体、时间边界、关键判断和需要核验的表述。" },
+    scope_ready: { title: "调研边界已经确定", detail: "先查权威原始材料，再用主流媒体交叉验证；事实、推断和未知信息分别标注。" },
+    research_submitted: { title: "已向联网检索服务提交核验请求", detail: "正在等待搜索和引用结果返回。耗时取决于联网服务，本页会持续保留真实状态。" },
+    research_returned: { title: "联网核验已经返回可追溯来源", detail: "已提取引用并去除重复链接，接下来只基于这些证据形成判断。" },
+    angles_comparing: { title: "正在基于证据比较传播角度", detail: "分别评估认知反转、利益相关和情绪／人性三种叙事张力。" },
+    angles_ready: { title: "事实结论与三个候选方向已经形成", detail: "事实校正和候选选题已经生成，正在保存项目产物。" },
+    completed: { title: "三个视频方向已经准备好", detail: "调研快照与选题结果已保存到本地项目目录。" },
+    failed: { title: "调研暂时没有完成", detail: "失败位置和错误已保留，可据此检查联网服务或模型配置。" },
+  },
+  en: {
+    scope_started: { title: "Topic received; defining the research target", detail: "Identifying the event, time boundaries, key claim, and statements that require verification." },
+    scope_ready: { title: "Research scope is ready", detail: "Primary sources come first, followed by cross-checks with established media; facts, inference, and unknowns stay separate." },
+    research_submitted: { title: "Verification request sent to web search", detail: "Waiting for search results and citations. The duration depends on the provider; this page keeps the real status visible." },
+    research_returned: { title: "Web verification returned traceable sources", detail: "Citations were extracted and duplicate links removed. The next step uses only this evidence base." },
+    angles_comparing: { title: "Comparing angles against the evidence", detail: "Evaluating reframe, personal stakes, and emotion/human nature as distinct narrative tensions." },
+    angles_ready: { title: "Fact conclusion and three candidate angles are ready", detail: "The fact correction and candidate topics are ready and are being saved." },
+    completed: { title: "Three video directions are ready", detail: "The research snapshot and topic results were saved in the local project directory." },
+    failed: { title: "Research did not finish", detail: "The failure point and error were preserved for checking the provider or model configuration." },
+  },
+} as const;
+
+export const TRACE_TAGS = {
+  zh: {
+    "标题与时间": "标题与时间", "人物与事件": "人物与事件", "数字与法律定性": "数字与法律定性", "传播价值": "传播价值",
+    "认知反转": "认知反转", "利益相关": "利益相关", "情绪／人性": "情绪／人性",
+  },
+  en: {
+    "标题与时间": "Title & timing", "人物与事件": "People & events", "数字与法律定性": "Numbers & legal claims", "传播价值": "Sharing value",
+    "认知反转": "Reframe", "利益相关": "Personal stakes", "情绪／人性": "Emotion / human nature",
+  },
+} as const;
+
 export const COPY = {
   zh: {
     pageTitle: "传播引擎｜AI 视频创作", home: "返回首页", brand: "传播引擎", localSpace: "本地创作空间",
@@ -63,6 +97,8 @@ export const COPY = {
     emotionalValue: "情绪价值", tension: "争议张力", radarNote: "我们不卖一种画风。我们寻找最适合这个观点的表达方式。",
     workingLine1: "先别急着写脚本。", workingBefore: "我在判断这件事", workingEmphasis: "为什么值得讲", workingAfter: "。",
     progressStages: ["理解意图", "核验事实", "寻找张力", "形成角度"], researchFailed: "这次调研没有完成，请新建一次重试。",
+    traceTitle: "导演工作记录", traceLive: "实时", traceRecords: "条真实记录", traceNotice: "记录工具调用与产物，不记录模型内部思考", traceCurrent: "进行中", traceDone: "已完成", traceWaiting: "正在建立第一条工作记录…",
+    traceSubject: "调研主题", traceProvider: "服务", traceSources: "来源", traceCorrection: "事实修正", traceAngles: "候选方向", traceError: "错误",
     topicsLine1: "同一件事，有三种", topicsEmphasis: "值得被转发", topicsAfter: "的讲法。",
     topicsLead: "先选你最认同的表达目的。这里决定视频的灵魂，后面的脚本和画面都会围绕它展开。",
     narrativeSections: "段叙事", chooseAngle: "就做这个方向", demoHint: "演示提示", factCorrection: "事实校正",
@@ -113,6 +149,8 @@ export const COPY = {
     emotionalValue: "Emotion", tension: "Tension", radarNote: "We do not sell one visual style. We find the clearest form for each idea.",
     workingLine1: "Do not write the script yet.", workingBefore: "I am finding", workingEmphasis: "why this matters", workingAfter: ".",
     progressStages: ["Understand intent", "Verify facts", "Find tension", "Shape angles"], researchFailed: "The research run did not finish. Start a new video to try again.",
+    traceTitle: "Director work log", traceLive: "Live", traceRecords: "real records", traceNotice: "Shows tool activity and outputs, not the model's private reasoning", traceCurrent: "In progress", traceDone: "Completed", traceWaiting: "Creating the first work record…",
+    traceSubject: "Subject", traceProvider: "Provider", traceSources: "Sources", traceCorrection: "Fact correction", traceAngles: "Candidate angles", traceError: "Error",
     topicsLine1: "One subject, three ways", topicsEmphasis: "people may share", topicsAfter: ".",
     topicsLead: "Choose the purpose you believe in most. This decision shapes the script, visuals, and emotional center of the video.",
     narrativeSections: "beats", chooseAngle: "Choose this angle", demoHint: "Demo notice", factCorrection: "Fact check",

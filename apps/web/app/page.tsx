@@ -14,10 +14,11 @@ import {
   SealCheck,
   SlidersHorizontal,
   Sparkle,
+  WarningCircle,
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
-import { COPY, EXAMPLES, MODES, STEP_LABELS, type Locale } from "./i18n";
+import { COPY, EXAMPLES, MODES, STEP_LABELS, TRACE_LABELS, TRACE_TAGS, type Locale } from "./i18n";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8010";
 
@@ -36,6 +37,26 @@ type Topic = {
 };
 type Source = { id: string; title: string; url: string; publisher: string; credibility: string; summary: string };
 type Run = { id: string; status: string; step: string; progress: number; error: string | null };
+type TraceEvent = {
+  id: number;
+  event_type: "progress" | "completed" | "failed" | string;
+  message: string;
+  created_at: string;
+  step?: string;
+  progress?: number;
+  trace_code?: string;
+  detail?: string;
+  subject?: string;
+  provider?: string;
+  source_count?: number;
+  publishers?: string[];
+  source_titles?: string[];
+  corrected_title?: string;
+  option_titles?: string[];
+  checks?: string[];
+  dimensions?: string[];
+  error?: string;
+};
 type ScriptSection = {
   section_type: string;
   title: string;
@@ -110,6 +131,7 @@ export default function Home() {
   const [mode, setMode] = useState<Mode>("title");
   const [input, setInput] = useState("");
   const [project, setProject] = useState<Project | null>(null);
+  const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [duration, setDuration] = useState(300);
@@ -126,6 +148,8 @@ export default function Home() {
   const modes = MODES[locale];
   const examples = EXAMPLES[locale];
   const stepLabels = STEP_LABELS[locale] as Record<string, string>;
+  const traceLabels = TRACE_LABELS[locale] as Record<string, { title: string; detail: string }>;
+  const traceTagLabels = TRACE_TAGS[locale] as Record<string, string>;
 
   const phase = !project ? "start" : project.production_card ? "card" : project.topic_options.length ? "topics" : "progress";
   const selected = useMemo(
@@ -212,11 +236,36 @@ export default function Home() {
   }, [settingsOpen]);
 
   useEffect(() => {
+    if (!project?.latest_run?.id) {
+      setTraceEvents([]);
+      return;
+    }
+    let active = true;
+    fetch(`${API}/v1/runs/${project.latest_run.id}/trace`)
+      .then((response) => response.ok ? response.json() : Promise.reject())
+      .then((payload: { events: TraceEvent[] }) => {
+        if (active) setTraceEvents(payload.events);
+      })
+      .catch(() => {
+        if (active) setTraceEvents([]);
+      });
+    return () => { active = false; };
+  }, [project?.latest_run?.id]);
+
+  useEffect(() => {
     if (!project?.latest_run || ["completed", "failed"].includes(project.latest_run.status)) return;
     let active = true;
     const refresh = async () => {
-      const response = await fetch(`${API}/v1/projects/${project.id}`);
-      if (response.ok && active) setProject(await response.json());
+      const [projectResponse, traceResponse] = await Promise.all([
+        fetch(`${API}/v1/projects/${project.id}`),
+        fetch(`${API}/v1/runs/${project.latest_run!.id}/trace`),
+      ]);
+      if (!active) return;
+      if (projectResponse.ok) setProject(await projectResponse.json());
+      if (traceResponse.ok) {
+        const payload = await traceResponse.json() as { events: TraceEvent[] };
+        setTraceEvents(payload.events);
+      }
     };
     const events = new EventSource(`${API}/v1/runs/${project.latest_run.id}/events`);
     for (const eventName of ["progress", "completed", "failed"]) {
@@ -228,7 +277,19 @@ export default function Home() {
       events.close();
       window.clearInterval(fallbackTimer);
     };
-  }, [project?.id, project?.latest_run?.status]);
+  }, [project?.id, project?.latest_run?.id, project?.latest_run?.status]);
+
+  function traceTime(value: string) {
+    const hasTimezone = /(?:Z|[+-]\d\d:\d\d)$/.test(value);
+    const date = new Date(hasTimezone ? value : `${value}Z`);
+    if (Number.isNaN(date.getTime())) return "--:--:--";
+    return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(date);
+  }
 
   async function start() {
     if (input.trim().length < 2) return;
@@ -539,6 +600,54 @@ export default function Home() {
               ))}
             </div>
           </div>
+          <section className="tracePanel" aria-label={t.traceTitle}>
+            <header className="traceHeader">
+              <div>
+                <span className="liveBadge"><i /> {t.traceLive}</span>
+                <div><b>{t.traceTitle}</b><small>{traceEvents.length} {t.traceRecords}</small></div>
+              </div>
+              <p><Eye /> {t.traceNotice}</p>
+            </header>
+            <div className="traceList">
+              {traceEvents.length === 0 && <div className="traceEmpty"><i /> {t.traceWaiting}</div>}
+              {traceEvents.map((event, index) => {
+                const localized = event.trace_code ? traceLabels[event.trace_code] : undefined;
+                const isFailed = event.event_type === "failed";
+                const isCurrent = index === traceEvents.length - 1 && project.latest_run?.status === "running";
+                const tags = event.checks ?? event.dimensions ?? event.publishers ?? [];
+                return (
+                  <article className={`traceItem${isCurrent ? " current" : ""}${isFailed ? " failed" : ""}`} key={event.id}>
+                    <div className="traceRail">
+                      <span>{isFailed ? <WarningCircle weight="fill" /> : isCurrent ? <i /> : <Check weight="bold" />}</span>
+                    </div>
+                    <div className="traceBody">
+                      <div className="traceMeta">
+                        <time>{traceTime(event.created_at)}</time>
+                        <span>{stepLabels[event.step ?? "queued"] ?? event.step}</span>
+                        <b>{isCurrent ? t.traceCurrent : t.traceDone}</b>
+                      </div>
+                      <h3>{localized?.title ?? event.message}</h3>
+                      <p>{localized?.detail ?? event.detail}</p>
+                      {event.subject && <div className="traceFact"><small>{t.traceSubject}</small><span>“{event.subject}”</span></div>}
+                      {event.provider && <div className="traceFact"><small>{t.traceProvider}</small><span>{event.provider}</span></div>}
+                      {typeof event.source_count === "number" && (
+                        <div className="traceFact"><small>{t.traceSources}</small><span>{event.source_count}</span></div>
+                      )}
+                      {tags.length > 0 && <div className="traceTags">{tags.map((tag) => <span key={tag}>{traceTagLabels[tag] ?? tag}</span>)}</div>}
+                      {event.source_titles && event.source_titles.length > 0 && (
+                        <ol className="traceArtifacts">{event.source_titles.map((title) => <li key={title}>{title}</li>)}</ol>
+                      )}
+                      {event.corrected_title && <div className="traceFact"><small>{t.traceCorrection}</small><span>{event.corrected_title}</span></div>}
+                      {event.option_titles && event.option_titles.length > 0 && (
+                        <div className="traceArtifactGroup"><small>{t.traceAngles}</small><ol>{event.option_titles.map((title) => <li key={title}>{title}</li>)}</ol></div>
+                      )}
+                      {event.error && <div className="traceError"><small>{t.traceError}</small><span>{event.error}</span></div>}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
           {project.latest_run?.status === "failed" && <p className="errorText">{project.latest_run.error ?? t.researchFailed}</p>}
         </section>
       )}

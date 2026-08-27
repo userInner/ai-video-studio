@@ -400,3 +400,29 @@ async def run_events(run_id: str, session: AsyncSession = Depends(get_session)) 
             await asyncio.sleep(0.8)
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/v1/runs/{run_id}/trace")
+async def run_trace(run_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    run = await session.get(WorkflowRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    events = (await session.scalars(
+        select(WorkflowEvent).where(WorkflowEvent.run_id == run_id).order_by(WorkflowEvent.id)
+    )).all()
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "step": run.step,
+        "progress": run.progress,
+        "events": [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "message": event.message,
+                "created_at": event.created_at.isoformat(),
+                **event.payload,
+            }
+            for event in events
+        ],
+    }

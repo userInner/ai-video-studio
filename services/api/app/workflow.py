@@ -43,13 +43,24 @@ class TopicConfirmationRunner:
             for run_id in result.all():
                 self.submit(run_id)
 
-    async def _event(self, session, run: WorkflowRun, step: str, progress: int, message: str) -> None:
+    async def _event(
+        self,
+        session,
+        run: WorkflowRun,
+        step: str,
+        progress: int,
+        message: str,
+        details: dict | None = None,
+    ) -> None:
         run.status = "running"
         run.step = step
         run.progress = progress
         if run.started_at is None:
             run.started_at = utcnow()
-        session.add(WorkflowEvent(run_id=run.id, event_type="progress", message=message, payload={"progress": progress, "step": step}))
+        payload = {"progress": progress, "step": step}
+        if details:
+            payload.update(details)
+        session.add(WorkflowEvent(run_id=run.id, event_type="progress", message=message, payload=payload))
         await session.commit()
 
     async def run(self, run_id: str) -> None:
@@ -61,11 +72,86 @@ class TopicConfirmationRunner:
             if project is None:
                 return
             try:
-                await self._event(session, run, "understanding", 12, "正在理解你想讲的核心问题")
-                await self._event(session, run, "researching", 32, "正在联网核对事实并寻找可靠来源")
+                await self._event(
+                    session,
+                    run,
+                    "understanding",
+                    12,
+                    "已收到主题，正在拆解调研目标",
+                    {
+                        "trace_code": "scope_started",
+                        "detail": "识别事件主体、时间边界、关键判断和需要核验的表述。",
+                        "subject": project.brief[:240],
+                    },
+                )
+                await self._event(
+                    session,
+                    run,
+                    "understanding",
+                    20,
+                    "调研边界已经确定",
+                    {
+                        "trace_code": "scope_ready",
+                        "detail": "先查权威原始材料，再用主流媒体交叉验证；事实、推断和未知信息分别标注。",
+                        "checks": ["标题与时间", "人物与事件", "数字与法律定性", "传播价值"],
+                    },
+                )
+                await self._event(
+                    session,
+                    run,
+                    "researching",
+                    32,
+                    "已向联网检索服务提交核验请求",
+                    {
+                        "trace_code": "research_submitted",
+                        "detail": "正在等待搜索和引用结果返回。耗时取决于联网服务，本页会持续保留真实状态。",
+                        "provider": "Sub2API Web Search",
+                    },
+                )
                 research = await self.researcher.search(project.brief)
-                await self._event(session, run, "synthesizing", 70, "Codex 正在基于证据比较传播角度")
+                publishers = list(dict.fromkeys(source.publisher for source in research.sources if source.publisher))
+                await self._event(
+                    session,
+                    run,
+                    "researching",
+                    52,
+                    f"联网核验返回 {len(research.sources)} 条可追溯来源",
+                    {
+                        "trace_code": "research_returned",
+                        "detail": "已提取引用并去除重复链接，接下来只基于这些证据形成判断。",
+                        "source_count": len(research.sources),
+                        "publishers": publishers[:8],
+                        "source_titles": [source.title for source in research.sources[:8]],
+                        "is_demo": research.is_demo,
+                    },
+                )
+                await self._event(
+                    session,
+                    run,
+                    "synthesizing",
+                    70,
+                    "正在基于证据比较传播角度",
+                    {
+                        "trace_code": "angles_comparing",
+                        "detail": "分别评估认知反转、利益相关和情绪／人性三种叙事张力。",
+                        "dimensions": ["认知反转", "利益相关", "情绪／人性"],
+                    },
+                )
                 discovery = await self.director.discover(project.brief, research)
+
+                await self._event(
+                    session,
+                    run,
+                    "synthesizing",
+                    90,
+                    "事实结论与三个候选方向已经形成",
+                    {
+                        "trace_code": "angles_ready",
+                        "detail": discovery.fact_note[:800],
+                        "corrected_title": discovery.corrected_title,
+                        "option_titles": [option.title for option in discovery.options],
+                    },
+                )
 
                 await session.execute(delete(Source).where(Source.project_id == project.id))
                 await session.execute(delete(TopicOption).where(TopicOption.project_id == project.id))
@@ -110,7 +196,19 @@ class TopicConfirmationRunner:
                 run.step = "ready_for_selection"
                 run.progress = 100
                 run.finished_at = utcnow()
-                session.add(WorkflowEvent(run_id=run.id, event_type="completed", message="三个视频方向已经准备好", payload={"progress": 100}))
+                session.add(WorkflowEvent(
+                    run_id=run.id,
+                    event_type="completed",
+                    message="三个视频方向已经准备好",
+                    payload={
+                        "progress": 100,
+                        "step": "ready_for_selection",
+                        "trace_code": "completed",
+                        "detail": "调研快照与选题结果已保存到本地项目目录。",
+                        "source_count": len(discovery.sources),
+                        "option_titles": [option.title for option in discovery.options],
+                    },
+                ))
                 await session.commit()
             except Exception as exc:
                 await session.rollback()
@@ -120,5 +218,16 @@ class TopicConfirmationRunner:
                     run.step = "failed"
                     run.error = str(exc)[:2000]
                     run.finished_at = utcnow()
-                    session.add(WorkflowEvent(run_id=run.id, event_type="failed", message="调研暂时没有完成", payload={"error": run.error}))
+                    session.add(WorkflowEvent(
+                        run_id=run.id,
+                        event_type="failed",
+                        message="调研暂时没有完成",
+                        payload={
+                            "error": run.error,
+                            "step": "failed",
+                            "progress": run.progress,
+                            "trace_code": "failed",
+                            "detail": "失败位置和错误已保留，可据此检查联网服务或模型配置。",
+                        },
+                    ))
                     await session.commit()
