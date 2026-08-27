@@ -107,6 +107,8 @@ class CodexScriptWriter:
             payload: Any = json.loads(result.final_response)
             script = ScriptContract.model_validate(payload)
         except Exception as exc:
+            if "invalid_json_schema" in str(exc):
+                raise ScriptWriterError("脚本输出格式配置错误，请更新服务后重新生成") from exc
             raise ScriptWriterError(f"Codex 脚本生成失败：{exc}") from exc
 
         allowed_urls = {_citation_key(source.url): source.url for source in research.sources}
