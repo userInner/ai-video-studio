@@ -17,6 +17,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
+import { COPY, EXAMPLES, MODES, STEP_LABELS, type Locale } from "./i18n";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8010";
 
@@ -103,37 +104,9 @@ type Project = {
   };
 };
 
-const modes: Array<{ id: Mode; label: string; hint: string }> = [
-  { id: "title", label: "我有标题", hint: "核验事实，再找角度" },
-  { id: "idea", label: "一个模糊想法", hint: "边聊边收紧选题" },
-  { id: "inspire", label: "帮我找选题", hint: "从传播机会出发" },
-];
-
-const examples = [
-  "为什么越来越多年轻人开始反向消费？",
-  "今天许家印被判无期徒刑，这件事真正意味着什么？",
-  "我想讲 AI，但不知道普通人最关心什么",
-];
-
-const stepLabels: Record<string, string> = {
-  queued: "排队准备",
-  understanding: "理解意图",
-  researching: "核验事实",
-  synthesizing: "设计角度",
-  ready_for_selection: "可以选择",
-  preparing_script: "整理素材",
-  writing_script: "撰写脚本",
-  validating_script: "校验脚本",
-  script_ready: "脚本完成",
-  waiting_for_script: "等待脚本",
-  storyboarding: "规划分镜",
-  generating_media: "生成配音与画面",
-  composing_video: "合成竖屏视频",
-  video_ready: "成片完成",
-  failed: "需要重试",
-};
-
 export default function Home() {
+  const [locale, setLocale] = useState<Locale>("zh");
+  const [localeReady, setLocaleReady] = useState(false);
   const [mode, setMode] = useState<Mode>("title");
   const [input, setInput] = useState("");
   const [project, setProject] = useState<Project | null>(null);
@@ -149,6 +122,10 @@ export default function Home() {
   const [secureAccess, setSecureAccess] = useState(false);
   const [voiceConnected, setVoiceConnected] = useState(false);
   const [voiceProgress, setVoiceProgress] = useState(0);
+  const t = COPY[locale];
+  const modes = MODES[locale];
+  const examples = EXAMPLES[locale];
+  const stepLabels = STEP_LABELS[locale] as Record<string, string>;
 
   const phase = !project ? "start" : project.production_card ? "card" : project.topic_options.length ? "topics" : "progress";
   const selected = useMemo(
@@ -167,6 +144,12 @@ export default function Home() {
   }
 
   useEffect(() => {
+    const savedLocale = window.localStorage.getItem("locale");
+    const initialLocale: Locale = savedLocale === "en" || savedLocale === "zh"
+      ? savedLocale
+      : window.navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+    setLocale(initialLocale);
+    setLocaleReady(true);
     setSecureAccess(
       window.location.protocol === "https:" ||
         window.isSecureContext === true ||
@@ -188,13 +171,20 @@ export default function Home() {
     setBusy(true);
     fetch(`${API}/v1/projects/${projectId}`)
       .then((response) => {
-        if (!response.ok) throw new Error("项目不存在");
+        if (!response.ok) throw new Error(t.projectMissing);
         return response.json();
       })
       .then(setProject)
-      .catch(() => setError("没有找到这个项目，它可能已经被移走。"))
+      .catch(() => setError(t.projectGone))
       .finally(() => setBusy(false));
   }, []);
+
+  useEffect(() => {
+    if (!localeReady) return;
+    window.localStorage.setItem("locale", locale);
+    document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
+    document.title = COPY[locale].pageTitle;
+  }, [locale, localeReady]);
 
   useEffect(() => {
     if (!project) return;
@@ -250,13 +240,13 @@ export default function Home() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ input: input.trim(), mode }),
       });
-      if (!response.ok) throw new Error("创建失败");
+      if (!response.ok) throw new Error(t.createFailed);
       const created = await response.json();
       const projectResponse = await fetch(`${API}/v1/projects/${created.project_id}`);
       window.history.replaceState({}, "", `?project=${created.project_id}`);
       setProject(await projectResponse.json());
     } catch {
-      setError("暂时无法开始，请确认本地服务已经启动。所有内容都还在。 ");
+      setError(t.startFailed);
     } finally {
       setBusy(false);
     }
@@ -282,7 +272,7 @@ export default function Home() {
       method: "POST",
     });
     if (response.ok) setProject(await response.json());
-    else setError(await responseMessage(response, "没有成功启动制作，请稍后重试。"));
+    else setError(await responseMessage(response, t.productionFailed));
     setBusy(false);
   }
 
@@ -304,7 +294,7 @@ export default function Home() {
     setVoiceProgress(0);
     try {
       const planResponse = await fetch(`${API}/v1/projects/${project.id}/voice-plan`);
-      if (!planResponse.ok) throw new Error(await responseMessage(planResponse, "配音计划还没有准备好。"));
+      if (!planResponse.ok) throw new Error(await responseMessage(planResponse, t.voicePlanPending));
       const plan = await planResponse.json() as {
         script_version: number;
         build_version: number;
@@ -318,14 +308,14 @@ export default function Home() {
           `${API}/v1/projects/${project.id}/voice-plan/${plan.script_version}/${plan.build_version}/scenes/${scene.index}`,
           { method: "PUT", headers: { "content-type": "audio/mpeg" }, body: audio },
         );
-        if (!upload.ok) throw new Error(await responseMessage(upload, `第 ${scene.index + 1} 段配音上传失败。`));
+        if (!upload.ok) throw new Error(await responseMessage(upload, `${t.sceneUploadBefore}${scene.index + 1}${t.sceneUploadAfter}`));
         setVoiceProgress(Math.round(((position + 1) / Math.max(1, pending.length)) * 100));
       }
       const response = await fetch(`${API}/v1/projects/${project.id}/produce-media`, { method: "POST" });
-      if (!response.ok) throw new Error(await responseMessage(response, "没有成功启动媒体制作，请稍后重试。"));
+      if (!response.ok) throw new Error(await responseMessage(response, t.mediaFailed));
       setProject(await response.json());
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "浏览器配音没有完成。");
+      setError(reason instanceof Error ? reason.message : t.browserVoiceFailed);
     } finally {
       setBusy(false);
     }
@@ -333,7 +323,7 @@ export default function Home() {
 
   function miniMaxEndpoint() {
     const parsed = new URL(miniMaxUrl.trim());
-    if (parsed.protocol !== "https:") throw new Error("MiniMax API URL 必须使用 HTTPS");
+    if (parsed.protocol !== "https:") throw new Error(t.httpsOnly);
     const root = parsed.toString().replace(/\/+$/, "").replace(/\/v1\/t2a_v2$/, "").replace(/\/v1$/, "");
     return `${root}/v1/t2a_v2`;
   }
@@ -352,11 +342,11 @@ export default function Home() {
         audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 },
       }),
     });
-    if (!response.ok) throw new Error(`MiniMax 请求失败（${response.status}）`);
+    if (!response.ok) throw new Error(`${t.requestFailed} (${response.status})`);
     const body = await response.json();
-    if (body.base_resp?.status_code !== 0) throw new Error(`MiniMax：${body.base_resp?.status_msg ?? "未知错误"}`);
+    if (body.base_resp?.status_code !== 0) throw new Error(`MiniMax: ${body.base_resp?.status_msg ?? t.unknownError}`);
     const hex = body.data?.audio;
-    if (typeof hex !== "string" || !hex.length || hex.length % 2 !== 0) throw new Error("MiniMax 没有返回有效音频");
+    if (typeof hex !== "string" || !hex.length || hex.length % 2 !== 0) throw new Error(t.invalidAudio);
     const bytes = new Uint8Array(hex.length / 2);
     for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
     return bytes;
@@ -367,14 +357,14 @@ export default function Home() {
     setVoiceBusy(true);
     setVoiceError("");
     try {
-      await synthesizeMiniMax("连接成功");
+      await synthesizeMiniMax(t.connectionPhrase);
       const credential = JSON.stringify({ baseUrl: miniMaxUrl.trim(), apiKey: miniMaxKey.trim() });
       window.sessionStorage.setItem("minimax:session", credential);
       if (project) window.sessionStorage.setItem(`minimax:${project.id}`, credential);
       setVoiceConnected(true);
       setSettingsOpen(false);
     } catch (reason) {
-      setVoiceError(reason instanceof Error ? reason.message : "MiniMax 连接测试没有通过。");
+      setVoiceError(reason instanceof Error ? reason.message : t.connectionFailed);
     } finally {
       setVoiceBusy(false);
     }
@@ -398,19 +388,23 @@ export default function Home() {
   return (
     <main className="shell">
       <header className="topbar">
-        <button className="brand" onClick={reset} aria-label="返回首页">
+        <button className="brand" onClick={reset} aria-label={t.home}>
           <span className="brandMark"><span /></span>
-          <span>传播引擎</span>
+          <span>{t.brand}</span>
           <small>VIDEO INTELLIGENCE</small>
         </button>
         <div className="topMeta">
-          <span className="statusDot" /> 本地创作空间
+          <span className="statusDot" /> {t.localSpace}
+          <div className="languageSwitch" aria-label="Language">
+            <button className={locale === "zh" ? "active" : ""} onClick={() => setLocale("zh")} aria-pressed={locale === "zh"}>中</button>
+            <button className={locale === "en" ? "active" : ""} onClick={() => setLocale("en")} aria-pressed={locale === "en"}>EN</button>
+          </div>
           <button className={`configButton ${voiceConnected ? "connected" : ""}`} onClick={() => { setVoiceError(""); setSettingsOpen(true); }}>
             <SlidersHorizontal weight="bold" />
-            <span>{voiceConnected ? "配音已连接" : "配置"}</span>
+            <span>{voiceConnected ? t.voiceConnected : t.config}</span>
             <i />
           </button>
-          <button className="ghostButton" onClick={reset}>新建视频</button>
+          <button className="ghostButton" onClick={reset}>{t.newVideo}</button>
         </div>
       </header>
 
@@ -420,23 +414,23 @@ export default function Home() {
             <div className="settingsTop">
               <div className="settingsTitle">
                 <span><Key weight="bold" /></span>
-                <div><small>VOICE PROVIDER</small><h2 id="voice-settings-title">配音配置</h2></div>
+                <div><small>VOICE PROVIDER</small><h2 id="voice-settings-title">{t.settingsTitle}</h2></div>
               </div>
-              <button className="settingsClose" onClick={() => setSettingsOpen(false)} aria-label="关闭配置"><X weight="bold" /></button>
+              <button className="settingsClose" onClick={() => setSettingsOpen(false)} aria-label={t.closeSettings}><X weight="bold" /></button>
             </div>
 
             <div className={`providerStatus ${voiceConnected ? "connected" : ""}`}>
-              <div><b>MiniMax</b><span>speech-2.8-hd · 普通话</span></div>
-              <strong>{voiceConnected ? "当前会话已连接" : "等待连接"}</strong>
+              <div><b>MiniMax</b><span>speech-2.8-hd · {t.mandarin}</span></div>
+              <strong>{voiceConnected ? t.sessionConnected : t.waitingConnection}</strong>
             </div>
 
-            <p className="settingsNote">浏览器直接请求 MiniMax。URL 和 API Key 只保存在当前标签页，不会发送给应用服务器。</p>
+            <p className="settingsNote">{t.settingsNote}</p>
 
             <div className="settingsRegion">
-              <span>服务区域</span>
-              <div className="regionSwitch" aria-label="MiniMax 服务区域">
-                <button className={miniMaxUrl.includes("minimax.io") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimax.io"); setVoiceConnected(false); }}>国际站</button>
-                <button className={miniMaxUrl.includes("minimaxi.com") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimaxi.com"); setVoiceConnected(false); }}>中国站</button>
+              <span>{t.serviceRegion}</span>
+              <div className="regionSwitch" aria-label={t.regionAria}>
+                <button className={miniMaxUrl.includes("minimax.io") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimax.io"); setVoiceConnected(false); }}>{t.international}</button>
+                <button className={miniMaxUrl.includes("minimaxi.com") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimaxi.com"); setVoiceConnected(false); }}>{t.china}</button>
               </div>
             </div>
 
@@ -451,24 +445,24 @@ export default function Home() {
                   type={showMiniMaxKey ? "text" : "password"}
                   value={miniMaxKey}
                   onChange={(event) => { setMiniMaxKey(event.target.value); setVoiceConnected(false); }}
-                  placeholder="填写你的 MiniMax API Key"
+                  placeholder={t.keyPlaceholder}
                   autoComplete="off"
                   spellCheck={false}
                 />
-                <button onClick={() => setShowMiniMaxKey((value) => !value)} aria-label={showMiniMaxKey ? "隐藏 API Key" : "显示 API Key"}>
+                <button onClick={() => setShowMiniMaxKey((value) => !value)} aria-label={showMiniMaxKey ? t.hideKey : t.showKey}>
                   {showMiniMaxKey ? <EyeSlash /> : <Eye />}
                 </button>
               </div>
             </label>
 
-            {!secureAccess && <div className="transportWarning">当前是公网 HTTP。为保护 API Key，请通过 HTTPS 域名打开后再连接。</div>}
+            {!secureAccess && <div className="transportWarning">{t.httpWarning}</div>}
             {voiceError && <div className="settingsError">{voiceError}</div>}
 
             <div className="settingsActions">
-              <small>连接测试会合成“连接成功”，产生极少量费用。</small>
-              {voiceConnected && <button className="disconnectVoice" onClick={disconnectMiniMax} disabled={voiceBusy}>清除凭证</button>}
+              <small>{t.testFee}</small>
+              {voiceConnected && <button className="disconnectVoice" onClick={disconnectMiniMax} disabled={voiceBusy}>{t.clearCredentials}</button>}
               <button className="connectVoice" onClick={connectMiniMax} disabled={voiceBusy || !secureAccess || !miniMaxKey.trim()}>
-                {voiceBusy ? "正在连接…" : voiceConnected ? "重新测试" : "保存并测试连接"}
+                {voiceBusy ? t.connecting : voiceConnected ? t.retest : t.saveTest}
               </button>
             </div>
           </section>
@@ -479,10 +473,10 @@ export default function Home() {
         <section className="startGrid">
           <div className="heroCopy">
             <p className="eyebrow"><Sparkle weight="fill" /> FROM IDEA TO IMPACT</p>
-            <h1>把一个念头，<br />做成<span>值得传播</span>的视频。</h1>
-            <p className="lede">先聊清楚你真正想表达什么。AI 会核验事实、找出传播角度，再和你确认一张制作卡。</p>
+            <h1>{t.heroLine1}<br />{t.heroLine2Before}{locale === "en" ? " " : ""}<span>{t.heroEmphasis}</span>{t.heroLine2After}</h1>
+            <p className="lede">{t.heroLead}</p>
 
-            <div className="modeTabs" role="tablist" aria-label="输入方式">
+            <div className="modeTabs" role="tablist" aria-label={t.inputMode}>
               {modes.map((item) => (
                 <button key={item.id} className={mode === item.id ? "active" : ""} onClick={() => setMode(item.id)}>
                   <strong>{item.label}</strong><span>{item.hint}</span>
@@ -495,34 +489,34 @@ export default function Home() {
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") start(); }}
-                placeholder={mode === "inspire" ? "告诉我你熟悉的领域、想影响谁；什么都没有也可以……" : "输入标题，或说说你脑子里还没成形的想法……"}
-                aria-label="视频想法"
+                placeholder={mode === "inspire" ? t.inspirePlaceholder : t.promptPlaceholder}
+                aria-label={t.videoIdea}
               />
               <div className="promptFooter">
-                <span>3–10 分钟 · 抖音竖屏 · AI 白板为默认视觉</span>
+                <span>{t.formatNote}</span>
                 <button onClick={start} disabled={busy || input.trim().length < 2}>
-                  {busy ? "正在创建" : "开始拆解"}<ArrowRight weight="bold" />
+                  {busy ? t.creating : t.start}<ArrowRight weight="bold" />
                 </button>
               </div>
             </div>
             {error && <p className="errorText">{error}</p>}
             <div className="examples">
-              <span>试试这些</span>
+              <span>{t.tryThese}</span>
               {examples.map((example) => <button key={example} onClick={() => setInput(example)}>{example}</button>)}
             </div>
           </div>
 
-          <aside className="radarCard" aria-label="传播力雷达">
-            <div className="radarHeader"><span>传播力雷达</span><small>LIVE FRAMEWORK</small></div>
+          <aside className="radarCard" aria-label={t.radar}>
+            <div className="radarHeader"><span>{t.radar}</span><small>LIVE FRAMEWORK</small></div>
             <div className="radar">
               <div className="ring ringOne" /><div className="ring ringTwo" /><div className="ring ringThree" />
               <div className="cross horizontal" /><div className="cross vertical" />
-              <div className="radarCore"><Lightning weight="fill" /><b>共鸣点</b><small>WHY SHARE</small></div>
-              <span className="radarLabel top">认知反转</span><span className="radarLabel right">利益相关</span>
-              <span className="radarLabel bottom">情绪价值</span><span className="radarLabel left">争议张力</span>
+              <div className="radarCore"><Lightning weight="fill" /><b>{t.resonance}</b><small>WHY SHARE</small></div>
+              <span className="radarLabel top">{t.cognitiveTurn}</span><span className="radarLabel right">{t.selfInterest}</span>
+              <span className="radarLabel bottom">{t.emotionalValue}</span><span className="radarLabel left">{t.tension}</span>
               <span className="sweep" />
             </div>
-            <div className="radarNote"><MagicWand /> 我们不卖一种画风。我们寻找最适合这个观点的表达方式。</div>
+            <div className="radarNote"><MagicWand /> {t.radarNote}</div>
           </aside>
         </section>
       )}
@@ -531,20 +525,20 @@ export default function Home() {
         <section className="workingStage">
           <div className="workingPulse"><span /><span /><span /><MagicWand weight="duotone" /></div>
           <p className="eyebrow">DIRECTOR AT WORK</p>
-          <h2>先别急着写脚本。<br />我在判断这件事<span>为什么值得讲</span>。</h2>
+          <h2>{t.workingLine1}<br />{t.workingBefore}{locale === "en" ? " " : ""}<span>{t.workingEmphasis}</span>{t.workingAfter}</h2>
           <blockquote>“{project.brief}”</blockquote>
           <div className="progressPanel">
             <div className="progressTop"><b>{stepLabels[project.latest_run?.step ?? "queued"]}</b><strong>{project.latest_run?.progress ?? 0}%</strong></div>
             <div className="progressTrack"><span style={{ width: `${project.latest_run?.progress ?? 0}%` }} /></div>
             <div className="progressSteps">
-              {["理解意图", "核验事实", "寻找张力", "形成角度"].map((label, index) => (
+              {t.progressStages.map((label, index) => (
                 <span key={label} className={(project.latest_run?.progress ?? 0) >= [12, 38, 72, 100][index] ? "done" : ""}>
                   <i>{(project.latest_run?.progress ?? 0) >= [12, 38, 72, 100][index] ? <Check /> : index + 1}</i>{label}
                 </span>
               ))}
             </div>
           </div>
-          {project.latest_run?.status === "failed" && <p className="errorText">{project.latest_run.error ?? "这次调研没有完成，请新建一次重试。"}</p>}
+          {project.latest_run?.status === "failed" && <p className="errorText">{project.latest_run.error ?? t.researchFailed}</p>}
         </section>
       )}
 
@@ -552,8 +546,8 @@ export default function Home() {
         <section className="resultStage">
           <div className="resultIntro">
             <p className="eyebrow"><SealCheck weight="fill" /> TOPIC DIRECTIONS READY</p>
-            <h2>同一件事，有三种<br /><span>值得被转发</span>的讲法。</h2>
-            <p>先选你最认同的表达目的。这里决定视频的灵魂，后面的脚本和画面都会围绕它展开。</p>
+            <h2>{t.topicsLine1}<br />{locale === "en" ? " " : ""}<span>{t.topicsEmphasis}</span>{t.topicsAfter}</h2>
+            <p>{t.topicsLead}</p>
           </div>
           <div className="topicGrid">
             {project.topic_options.map((topic, index) => (
@@ -562,20 +556,20 @@ export default function Home() {
                 <div className="topicLabel">{topic.label}</div>
                 <h3>{topic.title}</h3>
                 <p className="hook">“{topic.hook}”</p>
-                <div className="topicMeta"><span>{topic.emotion}</span><span>{topic.narrative.length} 段叙事</span></div>
+                <div className="topicMeta"><span>{topic.emotion}</span><span>{topic.narrative.length} {t.narrativeSections}</span></div>
                 <p className="insight">{topic.insight}</p>
-                <button onClick={() => choose(topic.id)} disabled={busy}>就做这个方向 <ArrowRight /></button>
+                <button onClick={() => choose(topic.id)} disabled={busy}>{t.chooseAngle} <ArrowRight /></button>
               </article>
             ))}
           </div>
           {project.fact_note && (
             <div className={`factNote ${isDemoEvidence ? "demo" : ""}`}>
-              <div><SealCheck weight="fill" /><b>{isDemoEvidence ? "演示提示" : "事实校正"}</b></div>
+              <div><SealCheck weight="fill" /><b>{isDemoEvidence ? t.demoHint : t.factCorrection}</b></div>
               <p>{project.fact_note}</p>
             </div>
           )}
           <div className="evidenceBar">
-            <div><SealCheck weight="fill" /><span><b>{isDemoEvidence ? "调研通路待完成" : "事实底稿已建立"}</b><small>{isDemoEvidence ? "当前展示流程演示来源，不会作为正式成片证据" : `当前收录 ${project.sources.length} 条来源，制作前继续深究`}</small></span></div>
+            <div><SealCheck weight="fill" /><span><b>{isDemoEvidence ? t.researchPending : t.factBaseReady}</b><small>{isDemoEvidence ? t.demoSources : `${t.sourceCountBefore} ${project.sources.length} ${t.sourceCountAfter}`}</small></span></div>
             <div className="sourceList">
               {project.sources.slice(0, 3).map((source) => (
                 <a key={source.id} href={source.url} target="_blank" rel="noreferrer"><LinkSimple /> {source.publisher || source.title}</a>
@@ -589,83 +583,83 @@ export default function Home() {
         <section className="cardStage">
           <div className="cardIntro">
             <p className="eyebrow"><Play weight="fill" /> PRODUCTION BRIEF</p>
-            <h2>方向定了。<br />确认这张<span>视频制作卡</span>。</h2>
-            <p>确认后先完成深度调研和写稿；脚本就绪后，浏览器直连 MiniMax 配音，再调用白板引擎合成视频。</p>
-            <div className="safetyNote"><SealCheck /><span>这一刻是人工决策点</span>不会因为一次点击就直接发布到抖音。</div>
+            <h2>{t.cardLine1}<br />{t.cardBefore}{locale === "en" ? " " : ""}<span>{t.cardEmphasis}</span>{t.cardAfter}</h2>
+            <p>{t.cardLead}</p>
+            <div className="safetyNote"><SealCheck /><span>{t.decisionPoint}</span>{t.decisionNote}</div>
           </div>
           <div className="studioColumn"><div className="productionCard">
-            <div className="productionTop"><span>制作卡 · V{project.production_card.version}</span><small>{project.production_card.status === "confirmed" ? "已锁定" : "等待确认"}</small></div>
-            <label>最终标题<textarea value={project.production_card.title} readOnly /></label>
-            <div className="cardField"><span>核心承诺</span><p>{project.production_card.promise}</p></div>
-            <div className="cardField"><span>目标观众</span><p>{project.production_card.audience}</p></div>
+            <div className="productionTop"><span>{t.productionCard} · V{project.production_card.version}</span><small>{project.production_card.status === "confirmed" ? t.locked : t.awaitingConfirmation}</small></div>
+            <label>{t.finalTitle}<textarea value={project.production_card.title} readOnly /></label>
+            <div className="cardField"><span>{t.promise}</span><p>{project.production_card.promise}</p></div>
+            <div className="cardField"><span>{t.audience}</span><p>{project.production_card.audience}</p></div>
             <div className="durationField">
-              <span><Clock /> 建议时长</span>
-              <div>{[180, 300, 480, 600].map((seconds) => <button key={seconds} className={project.production_card?.duration_seconds === seconds ? "active" : ""} onClick={() => updateDuration(seconds)}>{seconds / 60} 分钟</button>)}</div>
+              <span><Clock /> {t.duration}</span>
+              <div>{[180, 300, 480, 600].map((seconds) => <button key={seconds} className={project.production_card?.duration_seconds === seconds ? "active" : ""} onClick={() => updateDuration(seconds)}>{seconds / 60} {t.minutes}</button>)}</div>
             </div>
-            <div className="structureField"><span>叙事骨架</span><ol>{project.production_card.structure.map((item) => <li key={item}>{item}</li>)}</ol></div>
+            <div className="structureField"><span>{t.structure}</span><ol>{project.production_card.structure.map((item) => <li key={item}>{item}</li>)}</ol></div>
             <section className={`voiceAccess ${voiceConnected ? "connected" : ""}`}>
               <div className="voiceAccessHead">
                 <div className="voiceStamp"><Key weight="bold" /></div>
-                <div><small>VOICE ACCESS · 私有调用凭证</small><b>{voiceConnected ? "MiniMax 已准备好" : "制作前需要连接 MiniMax"}</b></div>
-                <span>{voiceConnected ? "浏览器已连接" : "未连接"}</span>
+                <div><small>VOICE ACCESS · {t.privateCredentials}</small><b>{voiceConnected ? t.miniMaxReady : t.miniMaxNeeded}</b></div>
+                <span>{voiceConnected ? t.browserConnected : t.notConnected}</span>
               </div>
-              <p>{voiceConnected ? "凭证只在当前标签页生效。生成配音时，浏览器会直接连接 MiniMax。" : "点击顶部“配置”填写 API URL 和 Key，连接后即可确认制作卡。"}</p>
+              <p>{voiceConnected ? t.credentialReadyNote : t.credentialNeededNote}</p>
               <button className="voiceConfigure" onClick={() => { setVoiceError(""); setSettingsOpen(true); }}>
-                <SlidersHorizontal weight="bold" /> {voiceConnected ? "查看配音配置" : "现在配置"} <ArrowRight weight="bold" />
+                <SlidersHorizontal weight="bold" /> {voiceConnected ? t.viewVoiceConfig : t.configureNow} <ArrowRight weight="bold" />
               </button>
             </section>
             {project.production_card.status === "confirmed" ? (
               <div className={`confirmedState ${project.production_run?.status === "failed" ? "failed" : ""}`}>
                 <SealCheck weight="fill" />
                 <div>
-                  <b>{project.final_video ? "最新竖屏视频已生成" : project.media_run && !["failed", "completed"].includes(project.media_run.status) ? "脚本已通过，正在生成成片" : project.script ? "第一版完整脚本已生成" : project.production_run?.status === "failed" ? "脚本生成未完成" : "制作卡已确认，正在写稿"}</b>
-                  <span>{project.final_video ? `${project.final_video.metadata.voice_provider === "minimax-browser" ? "浏览器直连 MiniMax 配音" : "固定主播配音"}、全程白板绘制、字幕与合成均已完成，可以直接播放预览。` : project.media_run?.error ?? (project.media_run ? stepLabels[project.media_run.step] : project.script ? "事实引用和时长已校验，可以从浏览器生成逐分镜配音。" : project.production_run?.error ?? stepLabels[project.production_run?.step ?? "queued"])}</span>
+                  <b>{project.final_video ? t.latestVideoReady : project.media_run && !["failed", "completed"].includes(project.media_run.status) ? t.makingVideo : project.script ? t.firstScriptReady : project.production_run?.status === "failed" ? t.scriptFailed : t.writingNow}</b>
+                  <span>{project.final_video ? `${project.final_video.metadata.voice_provider === "minimax-browser" ? t.directMiniMax : t.fixedVoice}${t.videoCompleteNote}` : project.media_run?.error ?? (project.media_run ? stepLabels[project.media_run.step] : project.script ? t.scriptVerified : project.production_run?.error ?? stepLabels[project.production_run?.step ?? "queued"])}</span>
                 </div>
               </div>
             ) : (
-              <button className="confirmButton" onClick={confirm} disabled={busy || !voiceConnected}>确认并开始制作 <ArrowRight weight="bold" /></button>
+              <button className="confirmButton" onClick={confirm} disabled={busy || !voiceConnected}>{t.confirmStart} <ArrowRight weight="bold" /></button>
             )}
             {project.production_run && !["completed", "failed"].includes(project.production_run.status) && (
               <div className="productionProgress">
-                <div><span>{stepLabels[project.production_run.step] ?? "正在制作"}</span><b>{project.production_run.progress}%</b></div>
+                <div><span>{stepLabels[project.production_run.step] ?? t.making}</span><b>{project.production_run.progress}%</b></div>
                 <i><span style={{ width: `${project.production_run.progress}%` }} /></i>
               </div>
             )}
             {project.media_run && !["completed", "failed"].includes(project.media_run.status) && (
               <div className="productionProgress mediaProgress">
-                <div><span>{stepLabels[project.media_run.step] ?? "正在制作成片"}</span><b>{project.media_run.progress}%</b></div>
+                <div><span>{stepLabels[project.media_run.step] ?? t.makingFinal}</span><b>{project.media_run.progress}%</b></div>
                 <i><span style={{ width: `${project.media_run.progress}%` }} /></i>
               </div>
             )}
-            {project.production_run?.status === "failed" && !project.script && <button className="retryButton" onClick={confirm} disabled={busy}>重新生成脚本 <ArrowRight /></button>}
-            {project.script && !project.final_video && (!project.media_run || project.media_run.status === "failed") && <button className="retryButton mediaButton" onClick={produceMedia} disabled={busy || !voiceConnected}>{busy && voiceProgress > 0 ? `浏览器正在生成配音 ${voiceProgress}%` : project.media_run?.status === "failed" ? "重新生成配音与成片" : "浏览器直连配音并生成成片"} <ArrowRight /></button>}
+            {project.production_run?.status === "failed" && !project.script && <button className="retryButton" onClick={confirm} disabled={busy}>{t.retryScript} <ArrowRight /></button>}
+            {project.script && !project.final_video && (!project.media_run || project.media_run.status === "failed") && <button className="retryButton mediaButton" onClick={produceMedia} disabled={busy || !voiceConnected}>{busy && voiceProgress > 0 ? `${t.browserVoicing} ${voiceProgress}%` : project.media_run?.status === "failed" ? t.retryMedia : t.makeMedia} <ArrowRight /></button>}
             {error && <p className="errorText">{error}</p>}
-            {selected && <p className="selectedNote">已选择：{selected.label} · {selected.emotion}</p>}
+            {selected && <p className="selectedNote">{t.selected}: {selected.label} · {selected.emotion}</p>}
           </div>
           {project.final_video && (
             <article className="videoPreview">
               <div className="videoPreviewTop">
-                <div><span>VERTICAL MASTER · V{project.storyboard?.version ?? 1}</span><h3>最新完整视频</h3></div>
-                <b>{Math.round(project.final_video.metadata.duration_seconds)} 秒 · 1080 × 1920</b>
+                <div><span>VERTICAL MASTER · V{project.storyboard?.version ?? 1}</span><h3>{t.latestVideo}</h3></div>
+                <b>{Math.round(project.final_video.metadata.duration_seconds)} {t.seconds} · 1080 × 1920</b>
               </div>
               <video controls playsInline preload="metadata" poster={project.final_video.poster_url ? `${API}${project.final_video.poster_url}` : undefined} src={`${API}${project.final_video.url}`} />
               <div className="videoMeta">
                 <span><SealCheck weight="fill" /> H.264 · AAC · {project.final_video.metadata.fps} FPS</span>
-                <span>{project.final_video.metadata.voice_provider === "qwen-local" ? "本地 Qwen 固定主播配音" : project.final_video.metadata.voice_provider === "macos-preview" ? "当前为本机预览声线" : "MiniMax 正式配音"}</span>
-                <button onClick={produceMedia} disabled={busy}>重新生成版本</button>
-                <a href={`${API}${project.final_video.url}`} download>下载 MP4 <ArrowRight /></a>
+                <span>{project.final_video.metadata.voice_provider === "qwen-local" ? t.qwenVoice : project.final_video.metadata.voice_provider === "macos-preview" ? t.previewVoice : t.miniMaxVoice}</span>
+                <button onClick={produceMedia} disabled={busy}>{t.regenerate}</button>
+                <a href={`${API}${project.final_video.url}`} download>{t.download} <ArrowRight /></a>
               </div>
             </article>
           )}
           {project.storyboard && (
             <article className="storyboardPreview">
-              <div className="scriptHeader"><div><span>STORYBOARD · V{project.storyboard.version}</span><h3>全程白板绘制分镜</h3></div><b>{project.storyboard.scenes.length} 个场景</b></div>
+              <div className="scriptHeader"><div><span>STORYBOARD · V{project.storyboard.version}</span><h3>{t.whiteboardStoryboard}</h3></div><b>{project.storyboard.scenes.length} {t.scenes}</b></div>
               <div className="storyboardGrid">
                 {project.storyboard.scenes.map((scene) => {
                   const visual = project.scene_visuals.find((item) => item.scene_index === scene.index);
                   return <div className="storyboardScene" key={scene.index}>
                     {visual && <img src={`${API}${visual.url}`} alt={scene.title} />}
-                    <div><small>{String(scene.index + 1).padStart(2, "0")} · {scene.visual_mode.replaceAll("_", " ")}</small><b>{scene.title}</b><span>{Math.round(scene.actual_seconds ?? scene.planned_seconds)} 秒</span></div>
+                    <div><small>{String(scene.index + 1).padStart(2, "0")} · {scene.visual_mode.replaceAll("_", " ")}</small><b>{scene.title}</b><span>{Math.round(scene.actual_seconds ?? scene.planned_seconds)} {t.seconds}</span></div>
                   </div>;
                 })}
               </div>
@@ -675,23 +669,23 @@ export default function Home() {
             <article className="scriptPreview">
               <div className="scriptHeader">
                 <div><span>SCRIPT · V{project.script.version}</span><h3>{project.script.title}</h3></div>
-                <b>{Math.round(project.script.estimated_duration_seconds / 60)} 分钟 · {project.script.sections.length} 段</b>
+                <b>{Math.round(project.script.estimated_duration_seconds / 60)} {t.minutes} · {project.script.sections.length} {t.narrativeSections}</b>
               </div>
-              <div className="scriptThesis"><small>核心论点</small><p>{project.script.thesis}</p></div>
+              <div className="scriptThesis"><small>{t.coreThesis}</small><p>{project.script.thesis}</p></div>
               <div className="scriptSections">
                 {project.script.sections.map((section, index) => (
                   <section key={`${section.title}-${index}`}>
                     <div className="scriptIndex">{String(index + 1).padStart(2, "0")}</div>
                     <div className="scriptCopy">
-                      <div className="scriptTitle"><h4>{section.title}</h4><time>{section.estimated_seconds} 秒</time></div>
+                      <div className="scriptTitle"><h4>{section.title}</h4><time>{section.estimated_seconds} {t.seconds}</time></div>
                       <p>{section.narration}</p>
                       <aside><MagicWand /> {section.visual_direction}</aside>
-                      {section.claim_source_urls.length > 0 && <div className="scriptSources">{section.claim_source_urls.map((url, sourceIndex) => <a href={url} target="_blank" rel="noreferrer" key={url}><LinkSimple /> 证据 {sourceIndex + 1}</a>)}</div>}
+                      {section.claim_source_urls.length > 0 && <div className="scriptSources">{section.claim_source_urls.map((url, sourceIndex) => <a href={url} target="_blank" rel="noreferrer" key={url}><LinkSimple /> {t.evidence} {sourceIndex + 1}</a>)}</div>}
                     </div>
                   </section>
                 ))}
               </div>
-              <div className="scriptClosing"><small>收束</small><p>{project.script.closing}</p></div>
+              <div className="scriptClosing"><small>{t.closing}</small><p>{project.script.closing}</p></div>
             </article>
           )}</div>
         </section>
