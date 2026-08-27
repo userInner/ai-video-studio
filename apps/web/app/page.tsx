@@ -163,7 +163,11 @@ export default function Home() {
   }
 
   useEffect(() => {
-    setSecureAccess(window.isSecureContext || ["localhost", "127.0.0.1"].includes(window.location.hostname));
+    setSecureAccess(
+      window.location.protocol === "https:" ||
+        window.isSecureContext === true ||
+        ["localhost", "127.0.0.1"].includes(window.location.hostname),
+    );
     const projectId = new URLSearchParams(window.location.search).get("project");
     if (!projectId) return;
     setBusy(true);
