@@ -1,5 +1,5 @@
 from app.director import CodexDirector
-from app.schemas import DiscoveryContract, ScriptContract
+from app.schemas import AngleDiscoveryContract, DiscoveryContract, ScriptContract
 
 
 def test_demo_discovery_satisfies_contract() -> None:
@@ -9,18 +9,18 @@ def test_demo_discovery_satisfies_contract() -> None:
     assert {option.label for option in validated.options} == {"认知反转", "利益相关", "人性透视"}
 
 
-def test_script_schema_is_strict_structured_output_compatible() -> None:
-    schema = ScriptContract.model_json_schema()
+def _assert_strict_structured_output_schema(node: object) -> None:
+    if isinstance(node, dict):
+        if node.get("type") == "object" and "properties" in node:
+            assert set(node.get("required", [])) == set(node["properties"])
+            assert node.get("additionalProperties") is False
+        for value in node.values():
+            _assert_strict_structured_output_schema(value)
+    elif isinstance(node, list):
+        for value in node:
+            _assert_strict_structured_output_schema(value)
 
-    def assert_all_object_properties_are_required(node: object) -> None:
-        if isinstance(node, dict):
-            if node.get("type") == "object" and "properties" in node:
-                assert set(node.get("required", [])) == set(node["properties"])
-                assert node.get("additionalProperties") is False
-            for value in node.values():
-                assert_all_object_properties_are_required(value)
-        elif isinstance(node, list):
-            for value in node:
-                assert_all_object_properties_are_required(value)
 
-    assert_all_object_properties_are_required(schema)
+def test_all_model_output_schemas_are_strict_compatible() -> None:
+    for contract in (AngleDiscoveryContract, ScriptContract):
+        _assert_strict_structured_output_schema(contract.model_json_schema())

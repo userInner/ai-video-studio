@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from openai_codex import AsyncCodex, CodexConfig, Sandbox
 
@@ -40,13 +41,22 @@ def _citation_key(value: str) -> str:
         if host.startswith(prefix):
             host = host.removeprefix(prefix)
             break
+    ignored_query_keys = {
+        "_",
+        "post-id",
+        "reader_id",
+        "url",
+    }
     query = [
         (key, item)
         for key, item in parse_qsl(parts.query, keep_blank_values=True)
-        if not key.lower().startswith("utm_")
+        if not key.lower().startswith("utm_") and key.lower() not in ignored_query_keys
     ]
-    path = parts.path.rstrip("/") or "/"
-    return urlunsplit((parts.scheme.lower(), host, path, urlencode(query), ""))
+    path = unquote(parts.path).rstrip("/") or "/"
+    path = re.sub(r"\.(?:cms|html?)$", "", path, flags=re.IGNORECASE) or "/"
+    # HTTP and HTTPS variants identify the same citation. The validated source
+    # URL is written back after matching, so downstream code still uses HTTPS.
+    return urlunsplit(("", host, path, urlencode(sorted(query)), ""))
 
 
 class CodexScriptWriter:
