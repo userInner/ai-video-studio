@@ -12,7 +12,9 @@ import {
   MagicWand,
   Play,
   SealCheck,
+  SlidersHorizontal,
   Sparkle,
+  X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -142,6 +144,8 @@ export default function Home() {
   const [miniMaxKey, setMiniMaxKey] = useState("");
   const [showMiniMaxKey, setShowMiniMaxKey] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
   const [secureAccess, setSecureAccess] = useState(false);
   const [voiceConnected, setVoiceConnected] = useState(false);
   const [voiceProgress, setVoiceProgress] = useState(0);
@@ -168,6 +172,17 @@ export default function Home() {
         window.isSecureContext === true ||
         ["localhost", "127.0.0.1"].includes(window.location.hostname),
     );
+    const savedVoice = window.sessionStorage.getItem("minimax:session");
+    if (savedVoice) {
+      try {
+        const saved = JSON.parse(savedVoice) as { baseUrl: string; apiKey: string };
+        setMiniMaxUrl(saved.baseUrl);
+        setMiniMaxKey(saved.apiKey);
+        setVoiceConnected(Boolean(saved.apiKey));
+      } catch {
+        window.sessionStorage.removeItem("minimax:session");
+      }
+    }
     const projectId = new URLSearchParams(window.location.search).get("project");
     if (!projectId) return;
     setBusy(true);
@@ -183,9 +198,8 @@ export default function Home() {
 
   useEffect(() => {
     if (!project) return;
-    const raw = window.sessionStorage.getItem(`minimax:${project.id}`);
+    const raw = window.sessionStorage.getItem(`minimax:${project.id}`) ?? window.sessionStorage.getItem("minimax:session");
     if (!raw) {
-      setVoiceConnected(false);
       return;
     }
     try {
@@ -195,9 +209,17 @@ export default function Home() {
       setVoiceConnected(Boolean(saved.apiKey));
     } catch {
       window.sessionStorage.removeItem(`minimax:${project.id}`);
-      setVoiceConnected(false);
     }
   }, [project?.id]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSettingsOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [settingsOpen]);
 
   useEffect(() => {
     if (!project?.latest_run || ["completed", "failed"].includes(project.latest_run.status)) return;
@@ -341,24 +363,27 @@ export default function Home() {
   }
 
   async function connectMiniMax() {
-    if (!project || !secureAccess) return;
+    if (!secureAccess) return;
     setVoiceBusy(true);
-    setError("");
+    setVoiceError("");
     try {
       await synthesizeMiniMax("连接成功");
-      window.sessionStorage.setItem(`minimax:${project.id}`, JSON.stringify({ baseUrl: miniMaxUrl.trim(), apiKey: miniMaxKey.trim() }));
+      const credential = JSON.stringify({ baseUrl: miniMaxUrl.trim(), apiKey: miniMaxKey.trim() });
+      window.sessionStorage.setItem("minimax:session", credential);
+      if (project) window.sessionStorage.setItem(`minimax:${project.id}`, credential);
       setVoiceConnected(true);
+      setSettingsOpen(false);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "MiniMax 连接测试没有通过。");
+      setVoiceError(reason instanceof Error ? reason.message : "MiniMax 连接测试没有通过。");
     } finally {
       setVoiceBusy(false);
     }
   }
 
   async function disconnectMiniMax() {
-    if (!project) return;
-    setError("");
-    window.sessionStorage.removeItem(`minimax:${project.id}`);
+    setVoiceError("");
+    window.sessionStorage.removeItem("minimax:session");
+    if (project) window.sessionStorage.removeItem(`minimax:${project.id}`);
     setMiniMaxKey("");
     setVoiceConnected(false);
   }
@@ -367,8 +392,6 @@ export default function Home() {
     setProject(null);
     setInput("");
     setError("");
-    setMiniMaxKey("");
-    setVoiceConnected(false);
     window.history.replaceState({}, "", window.location.pathname);
   }
 
@@ -382,9 +405,75 @@ export default function Home() {
         </button>
         <div className="topMeta">
           <span className="statusDot" /> 本地创作空间
+          <button className={`configButton ${voiceConnected ? "connected" : ""}`} onClick={() => { setVoiceError(""); setSettingsOpen(true); }}>
+            <SlidersHorizontal weight="bold" />
+            <span>{voiceConnected ? "配音已连接" : "配置"}</span>
+            <i />
+          </button>
           <button className="ghostButton" onClick={reset}>新建视频</button>
         </div>
       </header>
+
+      {settingsOpen && (
+        <div className="settingsScrim" onMouseDown={(event) => { if (event.currentTarget === event.target) setSettingsOpen(false); }}>
+          <section className="settingsPanel" role="dialog" aria-modal="true" aria-labelledby="voice-settings-title">
+            <div className="settingsTop">
+              <div className="settingsTitle">
+                <span><Key weight="bold" /></span>
+                <div><small>VOICE PROVIDER</small><h2 id="voice-settings-title">配音配置</h2></div>
+              </div>
+              <button className="settingsClose" onClick={() => setSettingsOpen(false)} aria-label="关闭配置"><X weight="bold" /></button>
+            </div>
+
+            <div className={`providerStatus ${voiceConnected ? "connected" : ""}`}>
+              <div><b>MiniMax</b><span>speech-2.8-hd · 普通话</span></div>
+              <strong>{voiceConnected ? "当前会话已连接" : "等待连接"}</strong>
+            </div>
+
+            <p className="settingsNote">浏览器直接请求 MiniMax。URL 和 API Key 只保存在当前标签页，不会发送给应用服务器。</p>
+
+            <div className="settingsRegion">
+              <span>服务区域</span>
+              <div className="regionSwitch" aria-label="MiniMax 服务区域">
+                <button className={miniMaxUrl.includes("minimax.io") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimax.io"); setVoiceConnected(false); }}>国际站</button>
+                <button className={miniMaxUrl.includes("minimaxi.com") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimaxi.com"); setVoiceConnected(false); }}>中国站</button>
+              </div>
+            </div>
+
+            <label className="settingsField">
+              <span>API URL</span>
+              <input value={miniMaxUrl} onChange={(event) => { setMiniMaxUrl(event.target.value); setVoiceConnected(false); }} spellCheck={false} />
+            </label>
+            <label className="settingsField">
+              <span>API KEY</span>
+              <div>
+                <input
+                  type={showMiniMaxKey ? "text" : "password"}
+                  value={miniMaxKey}
+                  onChange={(event) => { setMiniMaxKey(event.target.value); setVoiceConnected(false); }}
+                  placeholder="填写你的 MiniMax API Key"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <button onClick={() => setShowMiniMaxKey((value) => !value)} aria-label={showMiniMaxKey ? "隐藏 API Key" : "显示 API Key"}>
+                  {showMiniMaxKey ? <EyeSlash /> : <Eye />}
+                </button>
+              </div>
+            </label>
+
+            {!secureAccess && <div className="transportWarning">当前是公网 HTTP。为保护 API Key，请通过 HTTPS 域名打开后再连接。</div>}
+            {voiceError && <div className="settingsError">{voiceError}</div>}
+
+            <div className="settingsActions">
+              <small>连接测试会合成“连接成功”，产生极少量费用。</small>
+              {voiceConnected && <button className="disconnectVoice" onClick={disconnectMiniMax} disabled={voiceBusy}>清除凭证</button>}
+              <button className="connectVoice" onClick={connectMiniMax} disabled={voiceBusy || !secureAccess || !miniMaxKey.trim()}>
+                {voiceBusy ? "正在连接…" : voiceConnected ? "重新测试" : "保存并测试连接"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {phase === "start" && (
         <section className="startGrid">
@@ -517,42 +606,13 @@ export default function Home() {
             <section className={`voiceAccess ${voiceConnected ? "connected" : ""}`}>
               <div className="voiceAccessHead">
                 <div className="voiceStamp"><Key weight="bold" /></div>
-                <div><small>VOICE ACCESS · 私有调用凭证</small><b>连接你自己的 MiniMax</b></div>
+                <div><small>VOICE ACCESS · 私有调用凭证</small><b>{voiceConnected ? "MiniMax 已准备好" : "制作前需要连接 MiniMax"}</b></div>
                 <span>{voiceConnected ? "浏览器已连接" : "未连接"}</span>
               </div>
-              <p>浏览器直接请求 MiniMax，再把生成的 MP3 交给白板合成器。URL 和 Key 不会发送到我们的服务器。</p>
-              <div className="regionSwitch" aria-label="MiniMax 服务区域">
-                <button className={miniMaxUrl.includes("minimax.io") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimax.io"); setVoiceConnected(false); }}>国际站</button>
-                <button className={miniMaxUrl.includes("minimaxi.com") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimaxi.com"); setVoiceConnected(false); }}>中国站</button>
-              </div>
-              <label className="credentialField">
-                <span>API URL</span>
-                <input value={miniMaxUrl} onChange={(event) => { setMiniMaxUrl(event.target.value); setVoiceConnected(false); }} spellCheck={false} />
-              </label>
-              <label className="credentialField">
-                <span>API KEY</span>
-                <div>
-                  <input
-                    type={showMiniMaxKey ? "text" : "password"}
-                    value={miniMaxKey}
-                    onChange={(event) => { setMiniMaxKey(event.target.value); setVoiceConnected(false); }}
-                    placeholder="填写你的 MiniMax API Key"
-                    autoComplete="off"
-                    spellCheck={false}
-                  />
-                  <button onClick={() => setShowMiniMaxKey((value) => !value)} aria-label={showMiniMaxKey ? "隐藏 API Key" : "显示 API Key"}>
-                    {showMiniMaxKey ? <EyeSlash /> : <Eye />}
-                  </button>
-                </div>
-              </label>
-              {!secureAccess && <div className="transportWarning">当前是公网 HTTP。为保护 API Key，请配置 HTTPS 域名后再连接。</div>}
-              <div className="voiceActions">
-                <small>测试会合成“连接成功”四个字，产生极少量费用。</small>
-                {voiceConnected && <button className="disconnectVoice" onClick={disconnectMiniMax} disabled={voiceBusy}>清除本地凭证</button>}
-                <button className="connectVoice" onClick={connectMiniMax} disabled={voiceBusy || !secureAccess || !miniMaxKey.trim()}>
-                  {voiceBusy ? "正在直连" : voiceConnected ? "重新测试" : "保存到当前会话并测试"}
-                </button>
-              </div>
+              <p>{voiceConnected ? "凭证只在当前标签页生效。生成配音时，浏览器会直接连接 MiniMax。" : "点击顶部“配置”填写 API URL 和 Key，连接后即可确认制作卡。"}</p>
+              <button className="voiceConfigure" onClick={() => { setVoiceError(""); setSettingsOpen(true); }}>
+                <SlidersHorizontal weight="bold" /> {voiceConnected ? "查看配音配置" : "现在配置"} <ArrowRight weight="bold" />
+              </button>
             </section>
             {project.production_card.status === "confirmed" ? (
               <div className={`confirmedState ${project.production_run?.status === "failed" ? "failed" : ""}`}>
