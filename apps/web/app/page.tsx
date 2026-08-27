@@ -387,6 +387,7 @@ export default function Home() {
 
   return (
     <main className="shell">
+      <title>{t.pageTitle}</title>
       <header className="topbar">
         <button className="brand" onClick={reset} aria-label={t.home}>
           <span className="brandMark"><span /></span>
