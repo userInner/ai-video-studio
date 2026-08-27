@@ -20,13 +20,16 @@ MiniMax is the default deployment path:
 
 ```dotenv
 PREFER_LOCAL_QWEN_TTS=false
-MINIMAX_API_KEY=replace-me
 TTS_MODEL=speech-2.8-hd
 TTS_VOICE_ID=replace-with-a-system-or-cloned-voice-id
 ```
 
-Use one stable `TTS_VOICE_ID` across every scene. Do not clone a person's voice
-without explicit authorization.
+The user enters the MiniMax API URL and API key in the web production card.
+The browser calls T2A directly, stores credentials only in `sessionStorage`,
+and uploads generated MP3 files to the application. The API server never
+receives the MiniMax key. Use HTTPS outside localhost and keep one stable
+`TTS_VOICE_ID` across every scene. Do not clone a person's voice without
+explicit authorization.
 
 ## Local Qwen3-TTS
 

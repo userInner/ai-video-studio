@@ -168,11 +168,9 @@ class SpeechSynthesizer:
         return results
 
     async def synthesize(self, text: str) -> tuple[bytes, str, str]:
-        if self.settings.minimax_api_key:
-            return await self._minimax(text), "minimax", self.settings.tts_model
         if self.settings.environment == "development" and self.settings.allow_native_tts_fallback:
             return await asyncio.to_thread(self._native_preview, text), "macos-preview", "Tingting"
-        raise MediaPipelineError("MiniMax API Key 尚未配置，无法生成正式配音")
+        raise MediaPipelineError("浏览器直连 MiniMax 的配音尚未上传，无法开始合成")
 
     def _local_qwen_batch(self, texts: list[str]) -> list[tuple[bytes, str, str, str]]:
         worker = Path(__file__).resolve().parents[1] / "scripts" / "qwen_tts_batch.py"
@@ -202,41 +200,6 @@ class SpeechSynthesizer:
                 (path.read_bytes(), "qwen-local", "Qwen3-TTS-12Hz-1.7B-Base · locked-voice-v1", "wav")
                 for path in outputs
             ]
-
-    async def _minimax(self, text: str) -> bytes:
-        payload = {
-            "model": self.settings.tts_model,
-            "text": text[:9999],
-            "stream": False,
-            "language_boost": "Chinese",
-            "output_format": "hex",
-            "voice_setting": {
-                "voice_id": self.settings.tts_voice_id,
-                "speed": 1.05,
-                "vol": 1,
-                "pitch": 0,
-            },
-            "audio_setting": {"sample_rate": 32000, "bitrate": 128000, "format": "mp3", "channel": 1},
-        }
-        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=30)) as client:
-            response = await client.post(
-                f"{self.settings.minimax_base_url.rstrip('/')}/v1/t2a_v2",
-                headers={"Authorization": f"Bearer {self.settings.minimax_api_key}", "Content-Type": "application/json"},
-                json=payload,
-            )
-        if response.status_code >= 400:
-            raise MediaPipelineError(f"MiniMax TTS 请求失败（{response.status_code}）")
-        body = response.json()
-        base_resp = body.get("base_resp") or {}
-        if base_resp.get("status_code", 0) != 0:
-            raise MediaPipelineError(f"MiniMax TTS 失败：{base_resp.get('status_msg', '未知错误')}")
-        audio_hex = (body.get("data") or {}).get("audio")
-        if not isinstance(audio_hex, str) or not audio_hex:
-            raise MediaPipelineError("MiniMax TTS 没有返回音频")
-        try:
-            return bytes.fromhex(audio_hex)
-        except ValueError as exc:
-            raise MediaPipelineError("MiniMax TTS 返回的音频数据已损坏") from exc
 
     @staticmethod
     def _native_preview(text: str) -> bytes:
@@ -1032,8 +995,8 @@ class MediaPipeline:
                     item_index = item["index"]
                     relative = f"{base}/audio/scene-{item_index + 1:02d}.{audio_extension}"
                     if (self.settings.asset_root / relative).is_file():
-                        provider = "qwen-local" if audio_extension == "wav" else ("minimax" if self.settings.minimax_api_key else "macos-preview")
-                        model = "Qwen3-TTS-12Hz-1.7B-Base · locked-voice-v1" if provider == "qwen-local" else (self.settings.tts_model if provider == "minimax" else "Tingting")
+                        provider = "qwen-local" if audio_extension == "wav" else "minimax-browser"
+                        model = "Qwen3-TTS-12Hz-1.7B-Base · locked-voice-v1" if provider == "qwen-local" else self.settings.tts_model
                         values[item_index] = (self.assets.read_bytes(relative), provider, model, audio_extension)
                     else:
                         missing.append(item)

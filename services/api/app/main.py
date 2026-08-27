@@ -4,7 +4,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import desc, select
@@ -13,8 +13,9 @@ from sqlalchemy.orm import selectinload
 
 from .config import get_settings
 from .db import SessionLocal, get_session, init_db
+from .media_pipeline import MediaPipelineError, build_storyboard
 from .media_workflow import MediaProductionRunner
-from .models import ArtifactVersion, MediaAsset, Message, ProductionCard, Project, ScriptVersion, StoryboardVersion, TopicOption, WorkflowEvent, WorkflowRun
+from .models import ArtifactVersion, MediaAsset, Message, ProductionCard, Project, ScriptVersion, Source, StoryboardVersion, TopicOption, WorkflowEvent, WorkflowRun
 from .production import ProductionRunner
 from .schemas import CreateProjectRequest, ProjectCreated, SelectTopicRequest, UpdateProductionCardRequest
 from .workflow import TopicConfirmationRunner
@@ -163,6 +164,86 @@ async def get_project(project_id: str, session: AsyncSession = Depends(get_sessi
     return await _project_payload(session, project_id)
 
 
+async def _voice_plan(session: AsyncSession, project_id: str) -> tuple[ScriptVersion, int, dict]:
+    project = await session.get(Project, project_id)
+    script = await session.scalar(
+        select(ScriptVersion).where(ScriptVersion.project_id == project_id).order_by(desc(ScriptVersion.version)).limit(1)
+    )
+    if project is None or script is None:
+        raise HTTPException(status_code=409, detail="完整脚本尚未生成")
+    current_version = await session.scalar(
+        select(StoryboardVersion.version).where(StoryboardVersion.project_id == project_id).order_by(desc(StoryboardVersion.version)).limit(1)
+    )
+    sources = (await session.scalars(select(Source).where(Source.project_id == project_id))).all()
+    source_payload = [{
+        "title": item.title,
+        "url": item.url,
+        "publisher": item.publisher,
+        "published_at": item.published_at,
+        "credibility": item.credibility,
+        "summary": item.summary,
+    } for item in sources]
+    try:
+        storyboard = build_storyboard(script.content_json, source_payload)
+    except MediaPipelineError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return script, (current_version or 0) + 1, storyboard
+
+
+@app.get("/v1/projects/{project_id}/voice-plan")
+async def get_voice_plan(project_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    script, build_version, storyboard = await _voice_plan(session, project_id)
+    base = f"projects/{project_id}/media/v{script.version}/build-{build_version}/audio"
+    scenes = []
+    for scene in storyboard["scenes"]:
+        path = settings.asset_root / base / f"scene-{scene['index'] + 1:02d}.mp3"
+        scenes.append({
+            "index": scene["index"],
+            "title": scene["title"],
+            "narration": scene["narration"],
+            "uploaded": path.is_file(),
+        })
+    return {
+        "script_version": script.version,
+        "build_version": build_version,
+        "model": settings.tts_model,
+        "voice_id": settings.tts_voice_id,
+        "scenes": scenes,
+    }
+
+
+@app.put("/v1/projects/{project_id}/voice-plan/{script_version}/{build_version}/scenes/{scene_index}")
+async def upload_scene_voice(
+    project_id: str,
+    script_version: int,
+    build_version: int,
+    scene_index: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    script, expected_build, storyboard = await _voice_plan(session, project_id)
+    if script.version != script_version or expected_build != build_version:
+        raise HTTPException(status_code=409, detail="配音计划已经更新，请刷新后重试")
+    if scene_index < 0 or scene_index >= len(storyboard["scenes"]):
+        raise HTTPException(status_code=404, detail="分镜不存在")
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="MP3 文件超过 20 MB")
+    if request.headers.get("content-type", "").split(";", 1)[0] not in {"audio/mpeg", "application/octet-stream"}:
+        raise HTTPException(status_code=415, detail="只接受 MP3 音频")
+    content = await request.body()
+    if not 512 <= len(content) <= 20 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="MP3 文件为空或超过 20 MB")
+    if not (content.startswith(b"ID3") or (content[0] == 0xFF and content[1] & 0xE0 == 0xE0)):
+        raise HTTPException(status_code=422, detail="上传内容不是有效的 MP3 音频")
+    relative = (
+        f"projects/{project_id}/media/v{script_version}/build-{build_version}/audio/"
+        f"scene-{scene_index + 1:02d}.mp3"
+    )
+    stored = media_runner.pipeline.assets.write_bytes(relative, content)
+    return {"scene_index": scene_index, "size_bytes": stored.size, "sha256": stored.sha256}
+
+
 @app.post("/v1/projects/{project_id}/select-topic")
 async def select_topic(project_id: str, payload: SelectTopicRequest, session: AsyncSession = Depends(get_session)) -> dict:
     project = await session.get(Project, project_id)
@@ -219,36 +300,10 @@ async def confirm_card(project_id: str, session: AsyncSession = Depends(get_sess
         existing_run = WorkflowRun(project_id=project_id, workflow_type="production")
         session.add(existing_run)
         await session.flush()
-    active_media_run = await session.scalar(
-        select(WorkflowRun)
-        .where(
-            WorkflowRun.project_id == project_id,
-            WorkflowRun.workflow_type == "media_production",
-            WorkflowRun.status.in_(["queued", "running"]),
-        )
-        .order_by(desc(WorkflowRun.created_at))
-        .limit(1)
-    )
-    final_asset = None
-    if current_script is not None:
-        final_asset = await session.scalar(
-            select(MediaAsset).where(
-                MediaAsset.script_version_id == current_script.id,
-                MediaAsset.kind == "final_video",
-                MediaAsset.status == "ready",
-            ).limit(1)
-        )
-    created_media_run = active_media_run is None and final_asset is None
-    if created_media_run:
-        active_media_run = WorkflowRun(project_id=project_id, workflow_type="media_production", step="waiting_for_script")
-        session.add(active_media_run)
-        await session.flush()
-    project.stage = "video_ready" if final_asset is not None else "media_production"
+    project.stage = "script_ready" if current_script is not None else "script_production"
     await session.commit()
     if created_run:
         production_runner.submit(existing_run.id)
-    if created_media_run:
-        media_runner.submit(active_media_run.id)
     return await _project_payload(session, project_id)
 
 
@@ -263,6 +318,17 @@ async def produce_media(project_id: str, session: AsyncSession = Depends(get_ses
     )
     if project is None or card is None or card.status != "confirmed" or script is None:
         raise HTTPException(status_code=409, detail="请先确认制作卡并生成脚本")
+    voice_script, build_version, storyboard = await _voice_plan(session, project_id)
+    missing = [
+        scene["index"]
+        for scene in storyboard["scenes"]
+        if not (
+            settings.asset_root
+            / f"projects/{project_id}/media/v{voice_script.version}/build-{build_version}/audio/scene-{scene['index'] + 1:02d}.mp3"
+        ).is_file()
+    ]
+    if missing:
+        raise HTTPException(status_code=409, detail=f"还有 {len(missing)} 个分镜没有从浏览器上传配音")
     active_run = await session.scalar(
         select(WorkflowRun).where(
             WorkflowRun.project_id == project_id,

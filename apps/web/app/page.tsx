@@ -4,6 +4,9 @@ import {
   ArrowRight,
   Check,
   Clock,
+  Eye,
+  EyeSlash,
+  Key,
   Lightning,
   LinkSimple,
   MagicWand,
@@ -135,6 +138,13 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [duration, setDuration] = useState(300);
+  const [miniMaxUrl, setMiniMaxUrl] = useState("https://api.minimax.io");
+  const [miniMaxKey, setMiniMaxKey] = useState("");
+  const [showMiniMaxKey, setShowMiniMaxKey] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [secureAccess, setSecureAccess] = useState(false);
+  const [voiceConnected, setVoiceConnected] = useState(false);
+  const [voiceProgress, setVoiceProgress] = useState(0);
 
   const phase = !project ? "start" : project.production_card ? "card" : project.topic_options.length ? "topics" : "progress";
   const selected = useMemo(
@@ -143,7 +153,17 @@ export default function Home() {
   );
   const isDemoEvidence = project?.research_status === "demo";
 
+  async function responseMessage(response: Response, fallback: string) {
+    try {
+      const body = await response.json();
+      return typeof body.detail === "string" ? body.detail : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
   useEffect(() => {
+    setSecureAccess(window.isSecureContext || ["localhost", "127.0.0.1"].includes(window.location.hostname));
     const projectId = new URLSearchParams(window.location.search).get("project");
     if (!projectId) return;
     setBusy(true);
@@ -156,6 +176,24 @@ export default function Home() {
       .catch(() => setError("没有找到这个项目，它可能已经被移走。"))
       .finally(() => setBusy(false));
   }, []);
+
+  useEffect(() => {
+    if (!project) return;
+    const raw = window.sessionStorage.getItem(`minimax:${project.id}`);
+    if (!raw) {
+      setVoiceConnected(false);
+      return;
+    }
+    try {
+      const saved = JSON.parse(raw) as { baseUrl: string; apiKey: string };
+      setMiniMaxUrl(saved.baseUrl);
+      setMiniMaxKey(saved.apiKey);
+      setVoiceConnected(Boolean(saved.apiKey));
+    } catch {
+      window.sessionStorage.removeItem(`minimax:${project.id}`);
+      setVoiceConnected(false);
+    }
+  }, [project?.id]);
 
   useEffect(() => {
     if (!project?.latest_run || ["completed", "failed"].includes(project.latest_run.status)) return;
@@ -214,9 +252,11 @@ export default function Home() {
     if (!project) return;
     setBusy(true);
     setError("");
-    const response = await fetch(`${API}/v1/projects/${project.id}/confirm`, { method: "POST" });
+    const response = await fetch(`${API}/v1/projects/${project.id}/confirm`, {
+      method: "POST",
+    });
     if (response.ok) setProject(await response.json());
-    else setError("没有成功启动制作，请稍后重试。");
+    else setError(await responseMessage(response, "没有成功启动制作，请稍后重试。"));
     setBusy(false);
   }
 
@@ -232,19 +272,99 @@ export default function Home() {
   }
 
   async function produceMedia() {
-    if (!project) return;
+    if (!project || !voiceConnected) return;
     setBusy(true);
     setError("");
-    const response = await fetch(`${API}/v1/projects/${project.id}/produce-media`, { method: "POST" });
-    if (response.ok) setProject(await response.json());
-    else setError("没有成功启动媒体制作，请稍后重试。");
-    setBusy(false);
+    setVoiceProgress(0);
+    try {
+      const planResponse = await fetch(`${API}/v1/projects/${project.id}/voice-plan`);
+      if (!planResponse.ok) throw new Error(await responseMessage(planResponse, "配音计划还没有准备好。"));
+      const plan = await planResponse.json() as {
+        script_version: number;
+        build_version: number;
+        scenes: Array<{ index: number; narration: string; uploaded: boolean }>;
+      };
+      const pending = plan.scenes.filter((scene) => !scene.uploaded);
+      for (let position = 0; position < pending.length; position += 1) {
+        const scene = pending[position];
+        const audio = await synthesizeMiniMax(scene.narration);
+        const upload = await fetch(
+          `${API}/v1/projects/${project.id}/voice-plan/${plan.script_version}/${plan.build_version}/scenes/${scene.index}`,
+          { method: "PUT", headers: { "content-type": "audio/mpeg" }, body: audio },
+        );
+        if (!upload.ok) throw new Error(await responseMessage(upload, `第 ${scene.index + 1} 段配音上传失败。`));
+        setVoiceProgress(Math.round(((position + 1) / Math.max(1, pending.length)) * 100));
+      }
+      const response = await fetch(`${API}/v1/projects/${project.id}/produce-media`, { method: "POST" });
+      if (!response.ok) throw new Error(await responseMessage(response, "没有成功启动媒体制作，请稍后重试。"));
+      setProject(await response.json());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "浏览器配音没有完成。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function miniMaxEndpoint() {
+    const parsed = new URL(miniMaxUrl.trim());
+    if (parsed.protocol !== "https:") throw new Error("MiniMax API URL 必须使用 HTTPS");
+    const root = parsed.toString().replace(/\/+$/, "").replace(/\/v1\/t2a_v2$/, "").replace(/\/v1$/, "");
+    return `${root}/v1/t2a_v2`;
+  }
+
+  async function synthesizeMiniMax(text: string) {
+    const response = await fetch(miniMaxEndpoint(), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${miniMaxKey.trim()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "speech-2.8-hd",
+        text: text.slice(0, 9999),
+        stream: false,
+        language_boost: "Chinese",
+        output_format: "hex",
+        voice_setting: { voice_id: "Chinese (Mandarin)_Reliable_Executive", speed: 1.05, vol: 1, pitch: 0 },
+        audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 },
+      }),
+    });
+    if (!response.ok) throw new Error(`MiniMax 请求失败（${response.status}）`);
+    const body = await response.json();
+    if (body.base_resp?.status_code !== 0) throw new Error(`MiniMax：${body.base_resp?.status_msg ?? "未知错误"}`);
+    const hex = body.data?.audio;
+    if (typeof hex !== "string" || !hex.length || hex.length % 2 !== 0) throw new Error("MiniMax 没有返回有效音频");
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+    return bytes;
+  }
+
+  async function connectMiniMax() {
+    if (!project || !secureAccess) return;
+    setVoiceBusy(true);
+    setError("");
+    try {
+      await synthesizeMiniMax("连接成功");
+      window.sessionStorage.setItem(`minimax:${project.id}`, JSON.stringify({ baseUrl: miniMaxUrl.trim(), apiKey: miniMaxKey.trim() }));
+      setVoiceConnected(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "MiniMax 连接测试没有通过。");
+    } finally {
+      setVoiceBusy(false);
+    }
+  }
+
+  async function disconnectMiniMax() {
+    if (!project) return;
+    setError("");
+    window.sessionStorage.removeItem(`minimax:${project.id}`);
+    setMiniMaxKey("");
+    setVoiceConnected(false);
   }
 
   function reset() {
     setProject(null);
     setInput("");
     setError("");
+    setMiniMaxKey("");
+    setVoiceConnected(false);
     window.history.replaceState({}, "", window.location.pathname);
   }
 
@@ -377,7 +497,7 @@ export default function Home() {
           <div className="cardIntro">
             <p className="eyebrow"><Play weight="fill" /> PRODUCTION BRIEF</p>
             <h2>方向定了。<br />确认这张<span>视频制作卡</span>。</h2>
-            <p>确认后，AI 才会开始深度调研、写稿、配音、生成插图并调用白板引擎合成视频。</p>
+            <p>确认后先完成深度调研和写稿；脚本就绪后，浏览器直连 MiniMax 配音，再调用白板引擎合成视频。</p>
             <div className="safetyNote"><SealCheck /><span>这一刻是人工决策点</span>不会因为一次点击就直接发布到抖音。</div>
           </div>
           <div className="studioColumn"><div className="productionCard">
@@ -390,16 +510,56 @@ export default function Home() {
               <div>{[180, 300, 480, 600].map((seconds) => <button key={seconds} className={project.production_card?.duration_seconds === seconds ? "active" : ""} onClick={() => updateDuration(seconds)}>{seconds / 60} 分钟</button>)}</div>
             </div>
             <div className="structureField"><span>叙事骨架</span><ol>{project.production_card.structure.map((item) => <li key={item}>{item}</li>)}</ol></div>
+            <section className={`voiceAccess ${voiceConnected ? "connected" : ""}`}>
+              <div className="voiceAccessHead">
+                <div className="voiceStamp"><Key weight="bold" /></div>
+                <div><small>VOICE ACCESS · 私有调用凭证</small><b>连接你自己的 MiniMax</b></div>
+                <span>{voiceConnected ? "浏览器已连接" : "未连接"}</span>
+              </div>
+              <p>浏览器直接请求 MiniMax，再把生成的 MP3 交给白板合成器。URL 和 Key 不会发送到我们的服务器。</p>
+              <div className="regionSwitch" aria-label="MiniMax 服务区域">
+                <button className={miniMaxUrl.includes("minimax.io") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimax.io"); setVoiceConnected(false); }}>国际站</button>
+                <button className={miniMaxUrl.includes("minimaxi.com") ? "active" : ""} onClick={() => { setMiniMaxUrl("https://api.minimaxi.com"); setVoiceConnected(false); }}>中国站</button>
+              </div>
+              <label className="credentialField">
+                <span>API URL</span>
+                <input value={miniMaxUrl} onChange={(event) => { setMiniMaxUrl(event.target.value); setVoiceConnected(false); }} spellCheck={false} />
+              </label>
+              <label className="credentialField">
+                <span>API KEY</span>
+                <div>
+                  <input
+                    type={showMiniMaxKey ? "text" : "password"}
+                    value={miniMaxKey}
+                    onChange={(event) => { setMiniMaxKey(event.target.value); setVoiceConnected(false); }}
+                    placeholder="填写你的 MiniMax API Key"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button onClick={() => setShowMiniMaxKey((value) => !value)} aria-label={showMiniMaxKey ? "隐藏 API Key" : "显示 API Key"}>
+                    {showMiniMaxKey ? <EyeSlash /> : <Eye />}
+                  </button>
+                </div>
+              </label>
+              {!secureAccess && <div className="transportWarning">当前是公网 HTTP。为保护 API Key，请配置 HTTPS 域名后再连接。</div>}
+              <div className="voiceActions">
+                <small>测试会合成“连接成功”四个字，产生极少量费用。</small>
+                {voiceConnected && <button className="disconnectVoice" onClick={disconnectMiniMax} disabled={voiceBusy}>清除本地凭证</button>}
+                <button className="connectVoice" onClick={connectMiniMax} disabled={voiceBusy || !secureAccess || !miniMaxKey.trim()}>
+                  {voiceBusy ? "正在直连" : voiceConnected ? "重新测试" : "保存到当前会话并测试"}
+                </button>
+              </div>
+            </section>
             {project.production_card.status === "confirmed" ? (
               <div className={`confirmedState ${project.production_run?.status === "failed" ? "failed" : ""}`}>
                 <SealCheck weight="fill" />
                 <div>
                   <b>{project.final_video ? "最新竖屏视频已生成" : project.media_run && !["failed", "completed"].includes(project.media_run.status) ? "脚本已通过，正在生成成片" : project.script ? "第一版完整脚本已生成" : project.production_run?.status === "failed" ? "脚本生成未完成" : "制作卡已确认，正在写稿"}</b>
-                  <span>{project.final_video ? "本地 Qwen 固定主播配音、全程白板绘制、字幕与合成均已完成，可以直接播放预览。" : project.media_run?.error ?? (project.media_run ? stepLabels[project.media_run.step] : project.script ? "事实引用和时长已校验，准备进入媒体制作。" : project.production_run?.error ?? stepLabels[project.production_run?.step ?? "queued"])}</span>
+                  <span>{project.final_video ? `${project.final_video.metadata.voice_provider === "minimax-browser" ? "浏览器直连 MiniMax 配音" : "固定主播配音"}、全程白板绘制、字幕与合成均已完成，可以直接播放预览。` : project.media_run?.error ?? (project.media_run ? stepLabels[project.media_run.step] : project.script ? "事实引用和时长已校验，可以从浏览器生成逐分镜配音。" : project.production_run?.error ?? stepLabels[project.production_run?.step ?? "queued"])}</span>
                 </div>
               </div>
             ) : (
-              <button className="confirmButton" onClick={confirm} disabled={busy}>确认并开始制作 <ArrowRight weight="bold" /></button>
+              <button className="confirmButton" onClick={confirm} disabled={busy || !voiceConnected}>确认并开始制作 <ArrowRight weight="bold" /></button>
             )}
             {project.production_run && !["completed", "failed"].includes(project.production_run.status) && (
               <div className="productionProgress">
@@ -414,7 +574,7 @@ export default function Home() {
               </div>
             )}
             {project.production_run?.status === "failed" && !project.script && <button className="retryButton" onClick={confirm} disabled={busy}>重新生成脚本 <ArrowRight /></button>}
-            {project.script && !project.final_video && (!project.media_run || project.media_run.status === "failed") && <button className="retryButton mediaButton" onClick={produceMedia} disabled={busy}>{project.media_run?.status === "failed" ? "重新生成成片" : "继续生成配音与成片"} <ArrowRight /></button>}
+            {project.script && !project.final_video && (!project.media_run || project.media_run.status === "failed") && <button className="retryButton mediaButton" onClick={produceMedia} disabled={busy || !voiceConnected}>{busy && voiceProgress > 0 ? `浏览器正在生成配音 ${voiceProgress}%` : project.media_run?.status === "failed" ? "重新生成配音与成片" : "浏览器直连配音并生成成片"} <ArrowRight /></button>}
             {error && <p className="errorText">{error}</p>}
             {selected && <p className="selectedNote">已选择：{selected.label} · {selected.emotion}</p>}
           </div>

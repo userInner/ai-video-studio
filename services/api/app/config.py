@@ -26,8 +26,6 @@ class Settings(BaseSettings):
     image_quality: str = "medium"
     image_timeout_seconds: int = 360
     media_quality_max_retries: int = 1
-    minimax_base_url: str = "https://api.minimax.io"
-    minimax_api_key: str | None = Field(default=None, repr=False)
     tts_model: str = "speech-2.8-hd"
     tts_voice_id: str = "Chinese (Mandarin)_Reliable_Executive"
     prefer_local_qwen_tts: bool = True

@@ -25,7 +25,7 @@ The demo is a 1080×1920 vertical MP4, approximately 2 minutes 50 seconds long. 
 - Render every scene stroke by stroke with the upstream `srt-whiteboard-animation` engine.
 - Mix evidence cards, data animations, relationship maps, keywords, and big numbers.
 - Detect slow pacing, repeated shots, empty or overcrowded frames, and regenerate weak images.
-- Use MiniMax with a stable `voice_id`, or optionally run a locked local Qwen3-TTS voice.
+- Let each user's browser call MiniMax directly with their own URL and API key, keeping the key out of the application server.
 - Export a 1080×1920 H.264/AAC MP4 and separate caption files.
 - Store projects, scripts, storyboards, media, and final videos locally with versioning.
 
@@ -77,12 +77,11 @@ SUB2API_API_KEY=your_sub2api_key
 TEXT_MODEL=gpt-5.6-luna
 IMAGE_MODEL=gpt-image-2
 
-MINIMAX_API_KEY=your_minimax_key
 TTS_MODEL=speech-2.8-hd
 TTS_VOICE_ID=Chinese (Mandarin)_Reliable_Executive
 ```
 
-The containers can start without API keys, allowing you to inspect the UI and demo topic-selection flow. Real research, AI illustrations, narration, and complete MP4 generation require the corresponding provider credentials.
+MiniMax credentials do not belong in `.env`. Each user enters their own MiniMax URL and API key in the production card. The browser calls MiniMax directly for every scene and uploads only the resulting MP3 files to this application. Credentials remain in that tab's `sessionStorage` and never reach the application server or database. Server-side Sub2API configuration is still required for real research and AI illustrations.
 
 ### 3. Start the application
 
@@ -131,7 +130,7 @@ docker compose up --build -d
 |---|---|---|
 | Research and script generation | Sub2API / Responses API | `SUB2API_API_KEY`, `TEXT_MODEL` |
 | AI illustrations | Sub2API / Images API | `SUB2API_API_KEY`, `IMAGE_MODEL` |
-| Voice-over | MiniMax | `MINIMAX_API_KEY`, `TTS_MODEL`, `TTS_VOICE_ID` |
+| Voice-over | MiniMax | User-supplied URL and API key in the browser; `TTS_MODEL`, `TTS_VOICE_ID` on the server |
 
 Keep `PREFER_LOCAL_QWEN_TTS=false` for the default CPU-friendly Compose deployment. Provider endpoints and model identifiers can be changed in `.env`. Never commit the `.env` file.
 
@@ -195,4 +194,4 @@ The included Compose file is intended for local use and private beta deployments
 - Long-running media jobs still execute inside the API process and can be interrupted by a service restart.
 - SQLite and local files are designed for a single node and do not provide multi-user authorization.
 - Natural speech speed can affect the requested 3–10 minute duration.
-- Public deployment requires additional security and operational infrastructure.
+- Public deployment requires HTTPS because the UI refuses to accept a MiniMax key over public HTTP. Authentication and other operational controls are still required.

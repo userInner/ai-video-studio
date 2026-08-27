@@ -26,7 +26,7 @@
 - 限制手部绘制占比，配合关键词、大数字、短字幕和轻运镜，避免整段视频像静态白板课件。
 - 自动穿插来源证据截图卡、数据动画和人物关系图，并为每项事实保留来源绑定。
 - 自动检测节奏过慢、重复镜头、画面过空或过密；低质量 AI 插图会追加纠正提示并重新生成。
-- 默认使用 MiniMax 固定 `voice_id` 配音；可选本地 Qwen3-TTS 锁定主播声纹。
+- 浏览器使用用户自己的 URL 和 API Key 直连 MiniMax，固定 `voice_id` 后逐分镜配音；Key 不进入应用服务器。
 - 输出 1080×1920、H.264/AAC 竖屏 MP4 和独立字幕文件。
 - 项目、脚本、分镜、媒体和成片全部版本化并保存在本地。
 
@@ -78,12 +78,11 @@ SUB2API_API_KEY=你的_SUB2API_Key
 TEXT_MODEL=gpt-5.6-luna
 IMAGE_MODEL=gpt-image-2
 
-MINIMAX_API_KEY=你的_MiniMax_Key
 TTS_MODEL=speech-2.8-hd
 TTS_VOICE_ID=Chinese (Mandarin)_Reliable_Executive
 ```
 
-密钥留空时容器仍能启动，也可以查看界面和演示选题流程；生成真实调研、AI 插图和完整 MP4 必须配置相应服务。
+MiniMax 不需要写入 `.env`。进入制作卡后，由每位用户在网页中填写自己的 MiniMax URL 和 API Key；浏览器直接向 MiniMax 生成逐分镜 MP3，再把音频上传给本应用合成。凭证只保存在当前标签页的 `sessionStorage`，不会进入应用服务器或数据库。真实调研和 AI 插图仍需要服务器端的 Sub2API 配置。
 
 ### 3. 一条命令启动
 
@@ -153,7 +152,6 @@ TEXT_MODEL=your-responses-model
 IMAGE_MODEL=your-image-model
 
 PREFER_LOCAL_QWEN_TTS=false
-MINIMAX_API_KEY=replace-me
 TTS_MODEL=speech-2.8-hd
 TTS_VOICE_ID=replace-with-a-stable-voice-id
 ```
@@ -172,7 +170,7 @@ TTS_VOICE_ID=replace-with-a-stable-voice-id
 
 | 方案 | 默认 | GPU | 特点 |
 |---|---:|---:|---|
-| MiniMax `speech-2.8-hd` | 是 | 不需要 | 部署简单，固定 `voice_id`，适合在线服务 |
+| MiniMax `speech-2.8-hd` | 是 | 不需要 | 用户浏览器 BYOK 直连，固定 `voice_id`，服务器不接触 Key |
 | Qwen3-TTS VoiceDesign + Base | 否 | 建议 | 本地运行，设计一次声线后克隆锁定，适合私有部署 |
 
 本地 Qwen 需要额外安装 `services/api/requirements-qwen.txt`，并分别准备 VoiceDesign 与 Base 模型。完整环境变量见 [.env.example](.env.example) 和 [docs/providers.md](docs/providers.md)。
@@ -208,4 +206,4 @@ data/                        本地数据库与媒体，不进入 Git
 - 长任务仍在 API 进程内运行，服务重启可能中断正在生成的媒体。
 - 默认使用 SQLite 和同机文件存储，尚未提供多用户权限。
 - 生成时长会受到 TTS 自然语速影响，仍需继续强化 3～10 分钟约束。
-- 公网部署前需要补充登录、任务队列、限流、HTTPS 和备份。
+- 公网部署必须使用 HTTPS；否则网页会禁止填写 MiniMax Key。还需补充登录、任务队列、限流和备份。

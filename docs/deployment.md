@@ -10,8 +10,8 @@ Recommended first production node:
 - 200 GB persistent NVMe storage
 - Docker Engine with Compose v2
 
-Copy `.env.example` to `.env`, set `SUB2API_API_KEY` and `MINIMAX_API_KEY`,
-keep `PREFER_LOCAL_QWEN_TTS=false`, then run:
+Copy `.env.example` to `.env`, set `SUB2API_API_KEY`, keep
+`PREFER_LOCAL_QWEN_TTS=false`, then run:
 
 ```bash
 git submodule update --init --recursive
@@ -24,6 +24,11 @@ before upgrading or moving the service.
 The included Compose file is suitable for a private beta. Before exposing it
 to the public internet, add a TLS reverse proxy, authentication, rate limits,
 media authorization and off-host backups.
+
+MiniMax uses browser-side BYOK. Users enter their own endpoint and key in the
+production card; the browser sends T2A requests directly to MiniMax and uploads
+only generated MP3 files. The UI rejects credentials on public HTTP, so HTTPS
+is required for this flow.
 
 ## Local Qwen deployment
 
