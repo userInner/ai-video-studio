@@ -13,6 +13,7 @@ import {
   Play,
   SealCheck,
   SlidersHorizontal,
+  SpeakerHigh,
   Sparkle,
   WarningCircle,
   X,
@@ -23,6 +24,40 @@ import { COPY, EXAMPLES, MODES, STEP_LABELS, TRACE_LABELS, TRACE_TAGS, type Loca
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8010";
 
 type Mode = "title" | "idea" | "inspire";
+type VoiceTemplateId = "zh-narrator" | "en-documentary" | "custom";
+type VoiceProfile = {
+  templateId: VoiceTemplateId;
+  model: string;
+  voiceId: string;
+  languageBoost: "Chinese" | "English" | "auto";
+  speed: number;
+  volume: number;
+  pitch: number;
+};
+type VoiceCredential = { baseUrl: string; apiKey: string; voice?: VoiceProfile };
+
+const VOICE_TEMPLATES: Record<Exclude<VoiceTemplateId, "custom">, VoiceProfile> = {
+  "zh-narrator": {
+    templateId: "zh-narrator",
+    model: "speech-2.8-hd",
+    voiceId: "Chinese (Mandarin)_Reliable_Executive",
+    languageBoost: "Chinese",
+    speed: 1.05,
+    volume: 1,
+    pitch: 0,
+  },
+  "en-documentary": {
+    templateId: "en-documentary",
+    model: "speech-2.8-hd",
+    voiceId: "English_expressive_narrator",
+    languageBoost: "English",
+    speed: 1,
+    volume: 1,
+    pitch: 0,
+  },
+};
+
+const DEFAULT_VOICE = VOICE_TEMPLATES["zh-narrator"];
 type Topic = {
   id: string;
   rank: number;
@@ -137,6 +172,7 @@ export default function Home() {
   const [duration, setDuration] = useState(300);
   const [miniMaxUrl, setMiniMaxUrl] = useState("https://api.minimax.io");
   const [miniMaxKey, setMiniMaxKey] = useState("");
+  const [voiceProfile, setVoiceProfile] = useState<VoiceProfile>({ ...DEFAULT_VOICE });
   const [showMiniMaxKey, setShowMiniMaxKey] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -157,6 +193,21 @@ export default function Home() {
     [project],
   );
   const isDemoEvidence = project?.research_status === "demo";
+  const voiceProfileName = voiceProfile.templateId === "zh-narrator"
+    ? t.chineseVoiceTemplate
+    : voiceProfile.templateId === "en-documentary" ? t.englishVoiceTemplate : t.customVoiceTemplate;
+
+  function restoreVoiceCredential(raw: string, projectStorageKey?: string) {
+    try {
+      const saved = JSON.parse(raw) as VoiceCredential;
+      setMiniMaxUrl(saved.baseUrl);
+      setMiniMaxKey(saved.apiKey);
+      if (saved.voice) setVoiceProfile(saved.voice);
+      setVoiceConnected(Boolean(saved.apiKey));
+    } catch {
+      window.sessionStorage.removeItem(projectStorageKey ?? "minimax:session");
+    }
+  }
 
   async function responseMessage(response: Response, fallback: string) {
     try {
@@ -180,16 +231,7 @@ export default function Home() {
         ["localhost", "127.0.0.1"].includes(window.location.hostname),
     );
     const savedVoice = window.sessionStorage.getItem("minimax:session");
-    if (savedVoice) {
-      try {
-        const saved = JSON.parse(savedVoice) as { baseUrl: string; apiKey: string };
-        setMiniMaxUrl(saved.baseUrl);
-        setMiniMaxKey(saved.apiKey);
-        setVoiceConnected(Boolean(saved.apiKey));
-      } catch {
-        window.sessionStorage.removeItem("minimax:session");
-      }
-    }
+    if (savedVoice) restoreVoiceCredential(savedVoice);
     const projectId = new URLSearchParams(window.location.search).get("project");
     if (!projectId) return;
     setBusy(true);
@@ -216,14 +258,7 @@ export default function Home() {
     if (!raw) {
       return;
     }
-    try {
-      const saved = JSON.parse(raw) as { baseUrl: string; apiKey: string };
-      setMiniMaxUrl(saved.baseUrl);
-      setMiniMaxKey(saved.apiKey);
-      setVoiceConnected(Boolean(saved.apiKey));
-    } catch {
-      window.sessionStorage.removeItem(`minimax:${project.id}`);
-    }
+    restoreVoiceCredential(raw, `minimax:${project.id}`);
   }, [project?.id]);
 
   useEffect(() => {
@@ -361,7 +396,19 @@ export default function Home() {
         build_version: number;
         scenes: Array<{ index: number; narration: string; uploaded: boolean }>;
       };
-      const pending = plan.scenes.filter((scene) => !scene.uploaded);
+      const signature = JSON.stringify({
+        model: voiceProfile.model,
+        voiceId: voiceProfile.voiceId,
+        languageBoost: voiceProfile.languageBoost,
+        speed: voiceProfile.speed,
+        volume: voiceProfile.volume,
+        pitch: voiceProfile.pitch,
+      });
+      const sceneSignatureKey = (sceneIndex: number) =>
+        `minimax:voice:${project.id}:${plan.script_version}:${plan.build_version}:${sceneIndex}`;
+      const pending = plan.scenes.filter((scene) =>
+        !scene.uploaded || window.sessionStorage.getItem(sceneSignatureKey(scene.index)) !== signature,
+      );
       for (let position = 0; position < pending.length; position += 1) {
         const scene = pending[position];
         const audio = await synthesizeMiniMax(scene.narration);
@@ -370,6 +417,7 @@ export default function Home() {
           { method: "PUT", headers: { "content-type": "audio/mpeg" }, body: audio },
         );
         if (!upload.ok) throw new Error(await responseMessage(upload, `${t.sceneUploadBefore}${scene.index + 1}${t.sceneUploadAfter}`));
+        window.sessionStorage.setItem(sceneSignatureKey(scene.index), signature);
         setVoiceProgress(Math.round(((position + 1) / Math.max(1, pending.length)) * 100));
       }
       const response = await fetch(`${API}/v1/projects/${project.id}/produce-media`, { method: "POST" });
@@ -394,12 +442,17 @@ export default function Home() {
       method: "POST",
       headers: { Authorization: `Bearer ${miniMaxKey.trim()}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "speech-2.8-hd",
+        model: voiceProfile.model,
         text: text.slice(0, 9999),
         stream: false,
-        language_boost: "Chinese",
+        language_boost: voiceProfile.languageBoost,
         output_format: "hex",
-        voice_setting: { voice_id: "Chinese (Mandarin)_Reliable_Executive", speed: 1.05, vol: 1, pitch: 0 },
+        voice_setting: {
+          voice_id: voiceProfile.voiceId.trim(),
+          speed: voiceProfile.speed,
+          vol: voiceProfile.volume,
+          pitch: voiceProfile.pitch,
+        },
         audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 },
       }),
     });
@@ -418,8 +471,11 @@ export default function Home() {
     setVoiceBusy(true);
     setVoiceError("");
     try {
-      await synthesizeMiniMax(t.connectionPhrase);
-      const credential = JSON.stringify({ baseUrl: miniMaxUrl.trim(), apiKey: miniMaxKey.trim() });
+      const sample = voiceProfile.languageBoost === "Chinese"
+        ? t.chineseVoiceSample
+        : t.englishVoiceSample;
+      await synthesizeMiniMax(sample);
+      const credential = JSON.stringify({ baseUrl: miniMaxUrl.trim(), apiKey: miniMaxKey.trim(), voice: voiceProfile });
       window.sessionStorage.setItem("minimax:session", credential);
       if (project) window.sessionStorage.setItem(`minimax:${project.id}`, credential);
       setVoiceConnected(true);
@@ -437,6 +493,18 @@ export default function Home() {
     if (project) window.sessionStorage.removeItem(`minimax:${project.id}`);
     setMiniMaxKey("");
     setVoiceConnected(false);
+  }
+
+  function applyVoiceTemplate(templateId: Exclude<VoiceTemplateId, "custom">) {
+    setVoiceProfile({ ...VOICE_TEMPLATES[templateId] });
+    setVoiceConnected(false);
+    setVoiceError("");
+  }
+
+  function customizeVoice(patch: Partial<Omit<VoiceProfile, "templateId">>) {
+    setVoiceProfile((current) => ({ ...current, ...patch, templateId: "custom" }));
+    setVoiceConnected(false);
+    setVoiceError("");
   }
 
   function reset() {
@@ -482,11 +550,88 @@ export default function Home() {
             </div>
 
             <div className={`providerStatus ${voiceConnected ? "connected" : ""}`}>
-              <div><b>MiniMax</b><span>speech-2.8-hd · {t.mandarin}</span></div>
+              <div><b>MiniMax</b><span>{voiceProfile.model} · {voiceProfileName}</span></div>
               <strong>{voiceConnected ? t.sessionConnected : t.waitingConnection}</strong>
             </div>
 
             <p className="settingsNote">{t.settingsNote}</p>
+
+            <section className="voiceTemplateSection" aria-labelledby="voice-template-title">
+              <header>
+                <div><small>VOICE BLUEPRINTS</small><b id="voice-template-title">{t.voiceTemplates}</b></div>
+                <span>{voiceProfile.templateId === "custom" ? t.customized : t.readyToUse}</span>
+              </header>
+              <div className="voiceTemplateGrid">
+                <button
+                  type="button"
+                  className={voiceProfile.templateId === "zh-narrator" ? "active" : ""}
+                  onClick={() => applyVoiceTemplate("zh-narrator")}
+                  aria-pressed={voiceProfile.templateId === "zh-narrator"}
+                >
+                  <span className="voiceTemplateTop"><i>中</i><strong>{t.chineseVoiceTemplate}</strong><em>{t.zhTemplateBadge}</em></span>
+                  <span className="voiceWave" aria-hidden="true"><i /><i /><i /><i /><i /><i /><i /></span>
+                  <small>{t.chineseVoiceDescription}</small>
+                </button>
+                <button
+                  type="button"
+                  className={voiceProfile.templateId === "en-documentary" ? "active" : ""}
+                  onClick={() => applyVoiceTemplate("en-documentary")}
+                  aria-pressed={voiceProfile.templateId === "en-documentary"}
+                >
+                  <span className="voiceTemplateTop"><i>EN</i><strong>{t.englishVoiceTemplate}</strong><em>{t.enTemplateBadge}</em></span>
+                  <span className="voiceWave english" aria-hidden="true"><i /><i /><i /><i /><i /><i /><i /></span>
+                  <small>{t.englishVoiceDescription}</small>
+                </button>
+              </div>
+            </section>
+
+            <section className="voiceTuning" aria-labelledby="voice-tuning-title">
+              <header>
+                <div><SpeakerHigh weight="bold" /><b id="voice-tuning-title">{t.customVoice}</b></div>
+                <small>{t.customVoiceNote}</small>
+              </header>
+              <div className="voiceTuningGrid">
+                <label className="voiceControl wide">
+                  <span>{t.voiceId}</span>
+                  <input
+                    value={voiceProfile.voiceId}
+                    onChange={(event) => customizeVoice({ voiceId: event.target.value })}
+                    placeholder={t.voiceIdPlaceholder}
+                    spellCheck={false}
+                  />
+                </label>
+                <label className="voiceControl">
+                  <span>{t.voiceModel}</span>
+                  <select value={voiceProfile.model} onChange={(event) => customizeVoice({ model: event.target.value })}>
+                    <option value="speech-2.8-hd">speech-2.8-hd</option>
+                    <option value="speech-2.8-turbo">speech-2.8-turbo</option>
+                  </select>
+                </label>
+                <label className="voiceControl">
+                  <span>{t.languageBoost}</span>
+                  <select
+                    value={voiceProfile.languageBoost}
+                    onChange={(event) => customizeVoice({ languageBoost: event.target.value as VoiceProfile["languageBoost"] })}
+                  >
+                    <option value="Chinese">中文 / Chinese</option>
+                    <option value="English">English</option>
+                    <option value="auto">Auto</option>
+                  </select>
+                </label>
+                <label className="voiceSlider">
+                  <span>{t.voiceSpeed}<output>{voiceProfile.speed.toFixed(2)}×</output></span>
+                  <input type="range" min="0.5" max="2" step="0.05" value={voiceProfile.speed} onChange={(event) => customizeVoice({ speed: Number(event.target.value) })} />
+                </label>
+                <label className="voiceSlider">
+                  <span>{t.voiceVolume}<output>{voiceProfile.volume.toFixed(1)}</output></span>
+                  <input type="range" min="0.1" max="2" step="0.1" value={voiceProfile.volume} onChange={(event) => customizeVoice({ volume: Number(event.target.value) })} />
+                </label>
+                <label className="voiceSlider wide">
+                  <span>{t.voicePitch}<output>{voiceProfile.pitch > 0 ? `+${voiceProfile.pitch}` : voiceProfile.pitch}</output></span>
+                  <input type="range" min="-12" max="12" step="1" value={voiceProfile.pitch} onChange={(event) => customizeVoice({ pitch: Number(event.target.value) })} />
+                </label>
+              </div>
+            </section>
 
             <div className="settingsRegion">
               <span>{t.serviceRegion}</span>
